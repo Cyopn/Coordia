@@ -27,13 +27,13 @@ export class AuthController {
   }
 
   @Post('verify-email')
-  verifyEmail(@Body() dto: VerifyEmailDto) {
-    return this.auth.verifyEmail(dto);
+  verifyEmail(@Body() dto: VerifyEmailDto, @Req() request: Request) {
+    return this.auth.verifyEmail(dto, request);
   }
 
   @Post('resend-verification')
-  resendVerification(@Body() dto: ResendVerificationDto) {
-    return this.auth.resendVerification(dto);
+  resendVerification(@Body() dto: ResendVerificationDto, @Req() request: Request) {
+    return this.auth.resendVerification(dto, request);
   }
 
   @Post('login')
@@ -46,13 +46,13 @@ export class AuthController {
   }
 
   @Post('request-password-reset')
-  requestPasswordReset(@Body() dto: RequestPasswordResetDto) {
-    return this.auth.requestPasswordReset(dto);
+  requestPasswordReset(@Body() dto: RequestPasswordResetDto, @Req() request: Request) {
+    return this.auth.requestPasswordReset(dto, request);
   }
 
   @Post('reset-password')
-  resetPassword(@Body() dto: ResetPasswordDto) {
-    return this.auth.resetPassword(dto);
+  resetPassword(@Body() dto: ResetPasswordDto, @Req() request: Request) {
+    return this.auth.resetPassword(dto, request);
   }
 
   @Post('change-password')

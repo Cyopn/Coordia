@@ -14,6 +14,7 @@ import { TokenService } from '../auth/token.service';
 import { PasswordService } from '../auth/password.service';
 import { MfaCryptoService } from './crypto.service';
 import { AuthorizationService } from '../../common/authorization/authorization.service';
+import { AuthThrottleService } from '../auth/auth-throttle.service';
 
 @Injectable()
 export class MfaService {
@@ -28,6 +29,8 @@ export class MfaService {
     private readonly passwords: PasswordService,
     @Inject(MfaCryptoService)
     private readonly crypto: MfaCryptoService,
+    @Inject(AuthThrottleService)
+    private readonly throttle: AuthThrottleService,
   ) {}
 
   async begin(request: Request) {
@@ -138,7 +141,8 @@ export class MfaService {
     return factor ? this.validCode(factor.secretCiphertext, code) : false;
   }
 
-  async issueLoginChallenge(userId: string): Promise<string> {
+  async issueLoginChallenge(userId: string, request: Request): Promise<string> {
+    await this.throttle.beforeAttempt(`mfa:${userId}`, request);
     await this.prisma.mfaChallenge.updateMany({
       where: { userId, consumedAt: null },
       data: { consumedAt: new Date() },
@@ -175,13 +179,15 @@ export class MfaService {
     let valid = await this.verifyForUser(challenge.userId, code);
     if (!valid) valid = await this.consumeRecoveryCode(challenge.userId, code);
     if (!valid) {
-      await this.prisma.mfaChallenge.update({
-        where: { id: challenge.id },
+      await this.prisma.mfaChallenge.updateMany({
+        where: { id: challenge.id, attempts: challenge.attempts, consumedAt: null },
         data: {
           attempts: { increment: 1 },
           consumedAt: challenge.attempts + 1 >= 5 ? new Date() : undefined,
         },
       });
+      await this.throttle.recordFailure(`mfa:${challenge.userId}`, request);
+      await this.throttle.blockIfThresholdReached(`mfa:${challenge.userId}`, request);
       throw new UnauthorizedException('Código MFA no válido');
     }
 
@@ -198,6 +204,7 @@ export class MfaService {
         result: 'SUCCESS',
       },
     });
+    await this.throttle.clear(`mfa:${challenge.userId}`, request);
     return { message: 'Inicio de sesión correcto.' };
   }
 

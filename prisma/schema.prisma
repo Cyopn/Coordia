@@ -517,6 +517,7 @@ model AuthThrottle {
   key        String   @id
   failures   Int      @default(0)
   resetAt    DateTime
+  blockedUntil DateTime?
   updatedAt  DateTime @updatedAt
 
   @@index([resetAt])

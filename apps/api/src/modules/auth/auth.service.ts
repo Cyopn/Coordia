@@ -46,6 +46,7 @@ export class AuthService {
   async register(dto: RegisterDto, request: Request) {
     const emailNormalized = this.normalizeEmail(dto.email);
     const genericMessage = { message: 'Si los datos son válidos, recibirás instrucciones por correo.' };
+    await this.throttle.beforeAttempt(emailNormalized, request);
     const existing = await this.prisma.user.findUnique({
       where: { emailNormalized },
       select: { id: true },
@@ -112,12 +113,15 @@ export class AuthService {
       });
       throw error;
     }
-    return { message: 'Registro creado. Revisa tu correo para verificar la cuenta.' };
+    await this.throttle.clear(emailNormalized, request);
+    return genericMessage;
   }
 
-  async resendVerification(dto: ResendVerificationDto) {
+  async resendVerification(dto: ResendVerificationDto, request: Request) {
+    const emailNormalized = this.normalizeEmail(dto.email);
+    await this.throttle.beforeAttempt(emailNormalized, request);
     const user = await this.prisma.user.findUnique({
-      where: { emailNormalized: this.normalizeEmail(dto.email) },
+      where: { emailNormalized },
       select: { id: true, email: true, status: true },
     });
     const genericMessage = 'Si la cuenta puede verificarse, recibirás un nuevo código por correo.';
@@ -158,10 +162,11 @@ export class AuthService {
       }),
     ]);
     await this.email.sendVerification(user.email, code);
+    await this.throttle.clear(emailNormalized, request);
     return { message: genericMessage };
   }
 
-  async verifyEmail(dto: VerifyEmailDto) {
+  async verifyEmail(dto: VerifyEmailDto, request: Request) {
     const emailNormalized = this.normalizeEmail(dto.email);
     const user = await this.prisma.user.findUnique({
       where: { emailNormalized },
@@ -196,6 +201,8 @@ export class AuthService {
       if (updated.count === 0) {
         throw new UnauthorizedException('Código no válido o expirado');
       }
+      await this.throttle.recordFailure(emailNormalized, request);
+      await this.throttle.blockIfThresholdReached(emailNormalized, request);
       throw new UnauthorizedException('Código no válido o expirado');
     }
     const verifiedAt = new Date();
@@ -221,6 +228,7 @@ export class AuthService {
         },
       });
     });
+    await this.throttle.clear(emailNormalized, request);
     return { message: 'Cuenta verificada correctamente.' };
   }
 
@@ -232,12 +240,15 @@ export class AuthService {
     });
     if (!user?.passwordHash || !(await this.passwords.verify(user.passwordHash, dto.password))) {
       await this.throttle.recordFailure(emailNormalized, request);
+      await this.throttle.blockIfThresholdReached(emailNormalized, request);
       throw new UnauthorizedException('Correo o contraseña no válidos');
     }
     if (user.status !== UserStatus.ACTIVE) {
       await this.throttle.recordFailure(emailNormalized, request);
+      await this.throttle.blockIfThresholdReached(emailNormalized, request);
       throw new UnauthorizedException('Correo o contraseña no válidos');
     }
+    await this.throttle.clear(emailNormalized, request);
     const activeMfa = await this.prisma.mfaFactor.findFirst({
       where: { userId: user.id, status: 'ACTIVE' },
       select: { id: true },
@@ -258,7 +269,7 @@ export class AuthService {
       throw new ConflictException('MFA obligatorio para cuentas administrativas');
     }
     if (activeMfa) {
-      const challengeToken = await this.mfa.issueLoginChallenge(user.id);
+      const challengeToken = await this.mfa.issueLoginChallenge(user.id, request);
       return {
         requiresMfa: true,
         challengeToken,
@@ -277,9 +288,11 @@ export class AuthService {
     return { message: 'Inicio de sesión correcto.' };
   }
 
-  async requestPasswordReset(dto: RequestPasswordResetDto) {
+  async requestPasswordReset(dto: RequestPasswordResetDto, request: Request) {
+    const emailNormalized = this.normalizeEmail(dto.email);
+    await this.throttle.beforeAttempt(emailNormalized, request);
     const user = await this.prisma.user.findUnique({
-      where: { emailNormalized: this.normalizeEmail(dto.email) },
+      where: { emailNormalized },
       select: { id: true, email: true, status: true },
     });
     const genericMessage = 'Si existe una cuenta elegible, recibirás instrucciones de recuperación por correo.';
@@ -310,10 +323,11 @@ export class AuthService {
       user.email,
       `${baseUrl}/reset-password?token=${encodeURIComponent(rawToken)}`,
     );
+    await this.throttle.clear(emailNormalized, request);
     return { message: genericMessage };
   }
 
-  async resetPassword(dto: ResetPasswordDto) {
+  async resetPassword(dto: ResetPasswordDto, request: Request) {
     const token = await this.prisma.passwordResetToken.findFirst({
       where: {
         tokenHash: this.tokens.hash(dto.token),
@@ -321,6 +335,8 @@ export class AuthService {
       },
     });
     if (!token || token.expiresAt <= new Date()) {
+      await this.throttle.recordFailure('reset-token', request);
+      await this.throttle.blockIfThresholdReached('reset-token', request);
       throw new UnauthorizedException('Enlace no válido o expirado');
     }
     const userId = token.userId;
@@ -374,6 +390,7 @@ export class AuthService {
         },
       });
     });
+    await this.throttle.clear('reset-token', request);
     return { message: 'Contraseña actualizada correctamente.' };
   }
 

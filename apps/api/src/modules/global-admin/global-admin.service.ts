@@ -6,6 +6,7 @@ import { PrismaService } from '../../common/database/prisma.service';
 import { PasswordService } from '../auth/password.service';
 import { MfaService } from '../mfa/mfa.service';
 import { BootstrapGlobalAdminDto } from './dto/bootstrap-global-admin.dto';
+import { AuthThrottleService } from '../auth/auth-throttle.service';
 
 @Injectable()
 export class GlobalAdminService {
@@ -13,9 +14,11 @@ export class GlobalAdminService {
     private readonly prisma: PrismaService,
     private readonly passwords: PasswordService,
     private readonly mfa: MfaService,
+    private readonly throttle: AuthThrottleService,
   ) {}
 
   async bootstrap(dto: BootstrapGlobalAdminDto, request: Request) {
+    await this.throttle.beforeAttempt(`global-admin:${dto.email.trim().toLowerCase()}`, request);
     const configuredToken = process.env.GLOBAL_ADMIN_BOOTSTRAP_TOKEN;
     if (!configuredToken) {
       throw new ServiceUnavailableException('La inicialización global no está habilitada');
@@ -23,6 +26,8 @@ export class GlobalAdminService {
     const suppliedHash = createHash('sha256').update(dto.bootstrapToken).digest();
     const configuredHash = createHash('sha256').update(configuredToken).digest();
     if (!timingSafeEqual(suppliedHash, configuredHash)) {
+      await this.throttle.recordFailure(`global-admin:${dto.email.trim().toLowerCase()}`, request);
+      await this.throttle.blockIfThresholdReached(`global-admin:${dto.email.trim().toLowerCase()}`, request);
       throw new UnauthorizedException('No autorizado');
     }
     const emailNormalized = dto.email.trim().toLowerCase();
@@ -37,6 +42,8 @@ export class GlobalAdminService {
       !(await this.passwords.verify(user.passwordHash, dto.password)) ||
       !(await this.mfa.verifyForUser(user.id, dto.mfaCode))
     ) {
+      await this.throttle.recordFailure(`global-admin:${emailNormalized}`, request);
+      await this.throttle.blockIfThresholdReached(`global-admin:${emailNormalized}`, request);
       throw new UnauthorizedException('No autorizado');
     }
     try {
@@ -68,6 +75,7 @@ export class GlobalAdminService {
       }
       throw error;
     }
+    await this.throttle.clear(`global-admin:${emailNormalized}`, request);
     return { message: 'Administrador global inicializado correctamente.' };
   }
 }

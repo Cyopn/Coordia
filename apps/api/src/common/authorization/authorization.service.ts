@@ -1,5 +1,6 @@
 import { ForbiddenException, Injectable } from '@nestjs/common';
 import { MembershipStatus } from '@prisma/client';
+import { PERMISSIONS } from '@coordia/shared';
 import { PrismaService } from '../database/prisma.service';
 
 @Injectable()
@@ -11,6 +12,11 @@ export class AuthorizationService {
     organizationId: string,
     permissionKey: string,
   ): Promise<boolean> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { isGlobalAdmin: true },
+    });
+    if (user?.isGlobalAdmin) return true;
     const membership = await this.prisma.membership.findFirst({
       where: {
         userId,
@@ -19,7 +25,23 @@ export class AuthorizationService {
         roles: {
           some: {
             role: {
-              permissions: { some: { permission: { key: permissionKey } } },
+              permissions: {
+                some: {
+                  permission: {
+                    key: {
+                      in: [
+                        permissionKey,
+                        ...(permissionKey.startsWith('project:')
+                          ? [PERMISSIONS.PROJECT_MANAGE]
+                          : []),
+                        ...(permissionKey.startsWith('resource:')
+                          ? [PERMISSIONS.PROJECT_MANAGE]
+                          : []),
+                      ],
+                    },
+                  },
+                },
+              },
             },
           },
         },

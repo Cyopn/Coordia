@@ -24,6 +24,13 @@ import { SessionWebSocketGateway } from './session-websocket.gateway';
     SessionService,
     TokenService,
   ],
-  exports: [SessionService, PasswordService, TokenService, SessionRevocationService, SessionWebSocketGateway],
+  exports: [
+    SessionService,
+    PasswordService,
+    TokenService,
+    AuthThrottleService,
+    SessionRevocationService,
+    SessionWebSocketGateway,
+  ],
 })
 export class AuthModule {}
