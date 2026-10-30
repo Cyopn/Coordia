@@ -1,7 +1,6 @@
 import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { Request } from 'express';
 import { createHash } from 'node:crypto';
-import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../common/database/prisma.service';
 
 @Injectable()
@@ -16,6 +15,7 @@ export class AuthThrottleService {
     const now = new Date();
     const keys = [
       this.key(`email:${email}`),
+      this.key(`ip:${request.ip ?? 'unknown'}`),
       this.key(`combo:${email}:${request.ip ?? 'unknown'}`),
     ];
     const buckets = await this.prisma.authThrottle.findMany({ where: { key: { in: keys } } });
@@ -41,7 +41,11 @@ export class AuthThrottleService {
         where: { key: { in: keys }, resetAt: { gt: now }, failures: { gte: this.maxFailures } },
         data: { blockedUntil },
       });
-      await this.recordBlock(keys[0] ?? '', failures, request);
+      await this.recordBlock(
+        buckets.find((bucket) => bucket.failures === failures)?.key ?? keys[0] ?? '',
+        failures,
+        request,
+      );
       throw new HttpException(
         {
           message: 'Demasiados intentos. Inténtalo más tarde.',
@@ -61,40 +65,33 @@ export class AuthThrottleService {
       `combo:${email}:${request.ip ?? 'unknown'}`,
     ]) {
       const key = this.key(value);
-      const updated = await this.prisma.authThrottle.updateMany({
-        where: { key, resetAt: { gt: now } },
-        data: {
-          failures: { increment: 1 },
-        },
-      });
-      if (updated.count === 0) {
-        try {
-          await this.prisma.authThrottle.upsert({
-            where: { key },
-            create: { key, failures: 1, resetAt },
-            update: { failures: 1, resetAt },
-          });
-        } catch (error) {
-          if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') {
-            throw error;
-          }
-          await this.prisma.authThrottle.updateMany({
-            where: { key, resetAt: { gt: now } },
-            data: { failures: { increment: 1 } },
-          });
-        }
-      }
-      await this.prisma.securityEvent.create({
-        data: {
-          eventType: 'auth.attempt_failed',
-          severity: 'MEDIUM',
-          metadata: {
-            bucketHash: this.key(`email:${email}`),
-            ipHash: request.ip ? this.key(`ip:${request.ip}`) : null,
-          },
-        },
-      });
+      await this.prisma.$executeRaw`
+        INSERT INTO "AuthThrottle" ("key", "failures", "resetAt", "updatedAt")
+        VALUES (${key}, 1, ${resetAt}, NOW())
+        ON CONFLICT ("key") DO UPDATE
+        SET
+          "failures" = CASE
+            WHEN "AuthThrottle"."resetAt" > NOW() THEN "AuthThrottle"."failures" + 1
+            ELSE 1
+          END,
+          "resetAt" = CASE
+            WHEN "AuthThrottle"."resetAt" > NOW() THEN "AuthThrottle"."resetAt"
+            ELSE ${resetAt}
+          END,
+          "blockedUntil" = NULL,
+          "updatedAt" = NOW()
+      `;
     }
+    await this.prisma.securityEvent.create({
+      data: {
+        eventType: 'auth.attempt_failed',
+        severity: 'MEDIUM',
+        metadata: {
+          bucketHash: this.key(`email:${email}`),
+          ipHash: request.ip ? this.key(`ip:${request.ip}`) : null,
+        },
+      },
+    });
   }
 
   async blockIfThresholdReached(email: string, request: Request): Promise<void> {
@@ -120,7 +117,6 @@ export class AuthThrottleService {
         key: {
           in: [
             this.key(`email:${email}`),
-            this.key(`ip:${request.ip ?? 'unknown'}`),
             this.key(`combo:${email}:${request.ip ?? 'unknown'}`),
           ],
         },

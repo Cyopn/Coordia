@@ -23,6 +23,10 @@ export class GlobalAdminService {
     if (!configuredToken) {
       throw new ServiceUnavailableException('La inicialización global no está habilitada');
     }
+    const expiresAt = process.env.GLOBAL_ADMIN_BOOTSTRAP_EXPIRES_AT;
+    if (expiresAt && Date.parse(expiresAt) <= Date.now()) {
+      throw new ServiceUnavailableException('La inicialización global no está habilitada');
+    }
     const suppliedHash = createHash('sha256').update(dto.bootstrapToken).digest();
     const configuredHash = createHash('sha256').update(configuredToken).digest();
     if (!timingSafeEqual(suppliedHash, configuredHash)) {

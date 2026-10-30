@@ -28,13 +28,14 @@ export class ProjectsService {
     return userId;
   }
 
-  private async projectInOrganization(organizationId: string, projectId: string) {
-    const project = await this.prisma.project.findFirst({
-      where: { id: projectId, organizationId },
-      select: { id: true },
-    });
-    if (!project) throw new NotFoundException('Proyecto no encontrado');
-    return project;
+  private async projectInOrganization(
+    userId: string,
+    organizationId: string,
+    projectId: string,
+    permission: string,
+  ) {
+    await this.authorization.requireProjectAccess(userId, organizationId, projectId, permission);
+    return { id: projectId };
   }
 
   async createProject(
@@ -58,8 +59,18 @@ export class ProjectsService {
           description: dto.description?.trim() || null,
           startsAt: dto.startsAt ? new Date(dto.startsAt) : null,
           endsAt: dto.endsAt ? new Date(dto.endsAt) : null,
+          visibility: dto.visibility,
         },
       });
+      if (dto.visibility === 'PRIVATE') {
+        const membership = await this.prisma.membership.findUniqueOrThrow({
+          where: { userId_organizationId: { userId, organizationId } },
+          select: { id: true },
+        });
+        await this.prisma.projectAccess.create({
+          data: { projectId: project.id, membershipId: membership.id },
+        });
+      }
       await this.audit(organizationId, userId, 'project.created', project.id);
       return project;
     } catch (error) {
@@ -71,7 +82,13 @@ export class ProjectsService {
     const userId = await this.sessions.requireUser(request);
     await this.authorization.requirePermission(userId, organizationId, PERMISSIONS.PROJECT_READ);
     return this.prisma.project.findMany({
-      where: { organizationId },
+      where: {
+        organizationId,
+        OR: [
+          { visibility: 'ORGANIZATION' },
+          { accessGrants: { some: { membership: { userId, status: 'ACTIVE' } } } },
+        ],
+      },
       include: { _count: { select: { objectives: true } } },
       orderBy: [{ status: 'asc' }, { name: 'asc' }],
     });
@@ -86,9 +103,11 @@ export class ProjectsService {
     const userId = await this.userWithPermission(
       organizationId,
       request,
-      PERMISSIONS.PROJECT_UPDATE,
+      dto.status === 'ARCHIVED' ? PERMISSIONS.PROJECT_ARCHIVE : PERMISSIONS.PROJECT_UPDATE,
     );
-    await this.projectInOrganization(organizationId, projectId);
+    const projectPermission =
+      dto.status === 'ARCHIVED' ? PERMISSIONS.PROJECT_ARCHIVE : PERMISSIONS.PROJECT_UPDATE;
+    await this.projectInOrganization(userId, organizationId, projectId, projectPermission);
     if (dto.startsAt && dto.endsAt && new Date(dto.endsAt) < new Date(dto.startsAt)) {
       throw new ConflictException('La fecha de finalización no puede preceder a la de inicio');
     }
@@ -101,6 +120,7 @@ export class ProjectsService {
           status: dto.status,
           startsAt: dto.startsAt ? new Date(dto.startsAt) : null,
           endsAt: dto.endsAt ? new Date(dto.endsAt) : null,
+          visibility: dto.visibility,
         },
       });
       await this.audit(organizationId, userId, 'project.updated', project.id);
@@ -121,7 +141,7 @@ export class ProjectsService {
       request,
       PERMISSIONS.PROJECT_UPDATE,
     );
-    await this.projectInOrganization(organizationId, projectId);
+    await this.projectInOrganization(userId, organizationId, projectId, PERMISSIONS.PROJECT_UPDATE);
     try {
       const objective = await this.prisma.objective.create({
         data: {
@@ -141,7 +161,7 @@ export class ProjectsService {
   async listObjectives(organizationId: string, projectId: string, request: Request) {
     const userId = await this.sessions.requireUser(request);
     await this.authorization.requirePermission(userId, organizationId, PERMISSIONS.PROJECT_READ);
-    await this.projectInOrganization(organizationId, projectId);
+    await this.projectInOrganization(userId, organizationId, projectId, PERMISSIONS.PROJECT_READ);
     return this.prisma.objective.findMany({
       where: { projectId },
       orderBy: [{ status: 'asc' }, { dueAt: 'asc' }, { title: 'asc' }],
@@ -160,7 +180,7 @@ export class ProjectsService {
       request,
       PERMISSIONS.PROJECT_UPDATE,
     );
-    await this.projectInOrganization(organizationId, projectId);
+    await this.projectInOrganization(userId, organizationId, projectId, PERMISSIONS.PROJECT_UPDATE);
     const objective = await this.prisma.objective.findFirst({
       where: { id: objectiveId, projectId },
       select: { id: true },

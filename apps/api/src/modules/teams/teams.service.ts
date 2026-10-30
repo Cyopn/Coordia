@@ -10,6 +10,7 @@ import { Request } from 'express';
 import { AuthorizationService } from '../../common/authorization/authorization.service';
 import { PrismaService } from '../../common/database/prisma.service';
 import { SessionService } from '../auth/session.service';
+import { PERMISSIONS } from '@coordia/shared';
 import { CreateDepartmentDto } from './dto/create-department.dto';
 import { CreateTeamDto } from './dto/create-team.dto';
 
@@ -24,14 +25,10 @@ export class TeamsService {
   private async requireAccess(
     organizationId: string,
     request: Request,
-    manage = false,
+    permission: string = PERMISSIONS.TEAM_READ,
   ): Promise<string> {
     const userId = await this.sessions.requireUser(request);
-    if (manage) {
-      await this.authorization.requirePermission(userId, organizationId, 'organization:update');
-    } else {
-      await this.authorization.requireMembership(userId, organizationId);
-    }
+    await this.authorization.requirePermission(userId, organizationId, permission);
     return userId;
   }
 
@@ -40,7 +37,7 @@ export class TeamsService {
     dto: CreateDepartmentDto,
     request: Request,
   ) {
-    const userId = await this.requireAccess(organizationId, request, true);
+    const userId = await this.requireAccess(organizationId, request, PERMISSIONS.TEAM_CREATE);
     try {
       const department = await this.prisma.department.create({
         data: {
@@ -78,7 +75,7 @@ export class TeamsService {
   }
 
   async createTeam(organizationId: string, dto: CreateTeamDto, request: Request) {
-    const userId = await this.requireAccess(organizationId, request, true);
+    const userId = await this.requireAccess(organizationId, request, PERMISSIONS.TEAM_CREATE);
     if (dto.departmentId) {
       const department = await this.prisma.department.findFirst({
         where: { id: dto.departmentId, organizationId },
@@ -137,7 +134,7 @@ export class TeamsService {
     membershipId: string,
     request: Request,
   ) {
-    const userId = await this.requireAccess(organizationId, request, true);
+    const userId = await this.requireAccess(organizationId, request, PERMISSIONS.TEAM_ASSIGN);
     const membership = await this.prisma.membership.findFirst({
       where: { id: membershipId, organizationId, status: MembershipStatus.ACTIVE },
       select: { id: true },
@@ -177,7 +174,7 @@ export class TeamsService {
     membershipId: string,
     request: Request,
   ) {
-    const userId = await this.requireAccess(organizationId, request, true);
+    const userId = await this.requireAccess(organizationId, request, PERMISSIONS.TEAM_ASSIGN);
     const result = await this.prisma.teamMember.deleteMany({
       where: { teamId, membershipId, team: { organizationId } },
     });

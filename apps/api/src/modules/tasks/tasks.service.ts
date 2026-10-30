@@ -28,12 +28,13 @@ export class TasksService {
     return userId;
   }
 
-  private async projectInOrganization(organizationId: string, projectId: string): Promise<void> {
-    const project = await this.prisma.project.findFirst({
-      where: { id: projectId, organizationId },
-      select: { id: true },
-    });
-    if (!project) throw new NotFoundException('Proyecto no encontrado');
+  private async projectInOrganization(
+    userId: string,
+    organizationId: string,
+    projectId: string,
+    permission: string,
+  ): Promise<void> {
+    await this.authorization.requireProjectAccess(userId, organizationId, projectId, permission);
   }
 
   private async validateRelations(
@@ -125,7 +126,7 @@ export class TasksService {
       request,
       PERMISSIONS.RESOURCE_CREATE,
     );
-    await this.projectInOrganization(organizationId, projectId);
+    await this.projectInOrganization(userId, organizationId, projectId, PERMISSIONS.RESOURCE_CREATE);
     if (dto.parentTaskId === undefined && dto.dependsOnIds?.includes(dto.parentTaskId ?? '')) {
       throw new ConflictException('Una tarea no puede depender de sí misma');
     }
@@ -173,7 +174,7 @@ export class TasksService {
   ) {
     const userId = await this.sessions.requireUser(request);
     await this.authorization.requirePermission(userId, organizationId, PERMISSIONS.PROJECT_READ);
-    await this.projectInOrganization(organizationId, projectId);
+    await this.projectInOrganization(userId, organizationId, projectId, PERMISSIONS.PROJECT_READ);
     const where: Prisma.TaskWhereInput = {
       projectId,
       status: query.status,
@@ -217,9 +218,20 @@ export class TasksService {
     const userId = await this.requirePermission(
       organizationId,
       request,
-      PERMISSIONS.RESOURCE_UPDATE,
+      dto.status !== undefined
+        ? PERMISSIONS.RESOURCE_STATUS
+        : dto.assigneeId !== undefined
+          ? PERMISSIONS.RESOURCE_ASSIGN
+          : PERMISSIONS.RESOURCE_UPDATE,
     );
-    await this.projectInOrganization(organizationId, projectId);
+    if (dto.status !== undefined && dto.assigneeId !== undefined) {
+      await this.authorization.requirePermission(
+        userId,
+        organizationId,
+        PERMISSIONS.RESOURCE_ASSIGN,
+      );
+    }
+    await this.projectInOrganization(userId, organizationId, projectId, PERMISSIONS.RESOURCE_UPDATE);
     const task = await this.prisma.task.findFirst({
       where: { id: taskId, projectId },
       select: { id: true },

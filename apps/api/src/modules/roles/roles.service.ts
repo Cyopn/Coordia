@@ -101,7 +101,7 @@ export class RolesService {
     await this.authorization.requirePermission(
       userId,
       organizationId,
-      PERMISSIONS.ROLE_UPDATE,
+      dto.permissionKeys.length > 0 ? PERMISSIONS.ROLE_ASSIGN : PERMISSIONS.ROLE_UPDATE,
     );
     this.validatePermissionKeys(dto.permissionKeys);
     const role = await this.prisma.role.findFirst({

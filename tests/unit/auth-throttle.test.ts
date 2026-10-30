@@ -18,8 +18,9 @@ test('blocks a bucket atomically once the failure threshold is reached', async (
         return { count: 1 };
       },
       deleteMany: async () => ({ count: 0 }),
-      upsert: async () => ({}) ,
+      upsert: async () => ({}),
     },
+    $executeRaw: async () => 1,
     securityEvent: {
       create: async () => ({}),
     },

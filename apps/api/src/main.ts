@@ -3,9 +3,11 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import cookieParser from 'cookie-parser';
 import { config } from 'dotenv';
+import express from 'express';
 import { NextFunction, Request, Response } from 'express';
 import { AppModule } from './app.module';
 import { SessionWebSocketGateway } from './modules/auth/session-websocket.gateway';
+import { assertSameOriginForCookieRequest } from './common/security/csrf';
 
 config({ path: '../../.env' });
 
@@ -48,13 +50,40 @@ function validateConfiguration(): void {
   ) {
     throw new Error('AUDIT_RETENTION_DAYS no puede ser menor de 180 días');
   }
+  if (
+    process.env.GLOBAL_ADMIN_BOOTSTRAP_TOKEN &&
+    process.env.GLOBAL_ADMIN_BOOTSTRAP_TOKEN.length < 32
+  ) {
+    throw new Error('GLOBAL_ADMIN_BOOTSTRAP_TOKEN debe tener al menos 32 caracteres');
+  }
+  if (
+    process.env.GLOBAL_ADMIN_BOOTSTRAP_EXPIRES_AT &&
+    (!Number.isFinite(Date.parse(process.env.GLOBAL_ADMIN_BOOTSTRAP_EXPIRES_AT)) ||
+      Date.parse(process.env.GLOBAL_ADMIN_BOOTSTRAP_EXPIRES_AT) <= Date.now())
+  ) {
+    throw new Error('GLOBAL_ADMIN_BOOTSTRAP_EXPIRES_AT debe ser una fecha futura válida');
+  }
 }
 
 async function bootstrap(): Promise<void> {
   validateConfiguration();
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, { bodyParser: false });
+  const expressApp = app.getHttpAdapter().getInstance();
+  const trustProxy = process.env.TRUST_PROXY?.trim();
+  if (trustProxy) expressApp.set('trust proxy', trustProxy);
+  expressApp.use(express.json({ limit: '1mb' }));
+  expressApp.use(express.urlencoded({ extended: false, limit: '100kb' }));
   app.use(cookieParser());
-  app.use((_request: Request, response: Response, next: NextFunction) => {
+  const allowedOrigins = (
+    process.env.WEB_ORIGINS ??
+    process.env.WEB_ORIGIN ??
+    'http://localhost:3000'
+  )
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+  app.use((request: Request, response: Response, next: NextFunction) => {
+    assertSameOriginForCookieRequest(request, allowedOrigins);
     response.setHeader('X-Content-Type-Options', 'nosniff');
     response.setHeader('X-Frame-Options', 'DENY');
     response.setHeader('Referrer-Policy', 'no-referrer');
@@ -74,14 +103,6 @@ async function bootstrap(): Promise<void> {
       transform: true,
     }),
   );
-  const allowedOrigins = (
-    process.env.WEB_ORIGINS ??
-    process.env.WEB_ORIGIN ??
-    'http://localhost:3000'
-  )
-    .split(',')
-    .map((origin) => origin.trim())
-    .filter(Boolean);
   app.enableCors({
     origin: allowedOrigins,
     credentials: true,

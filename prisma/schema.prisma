@@ -59,6 +59,11 @@ enum ProjectStatus {
   ARCHIVED
 }
 
+enum ProjectVisibility {
+  ORGANIZATION
+  PRIVATE
+}
+
 enum ObjectiveStatus {
   NOT_STARTED
   IN_PROGRESS
@@ -158,6 +163,7 @@ model Project {
   name           String
   description    String?
   status         ProjectStatus @default(ACTIVE)
+  visibility     ProjectVisibility @default(ORGANIZATION)
   startsAt       DateTime?
   endsAt         DateTime?
   createdAt      DateTime      @default(now())
@@ -165,9 +171,21 @@ model Project {
   organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   objectives     Objective[]
   tasks          Task[]
+  accessGrants   ProjectAccess[]
 
   @@unique([organizationId, name])
   @@index([organizationId, status])
+}
+
+model ProjectAccess {
+  projectId    String     @db.Uuid
+  membershipId String     @db.Uuid
+  project      Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  membership   Membership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+  createdAt    DateTime   @default(now())
+
+  @@id([projectId, membershipId])
+  @@index([membershipId])
 }
 
 model Task {
@@ -305,6 +323,7 @@ model Membership {
   roles          MembershipRole[]
   teamMemberships TeamMember[]
   assignedTasks   Task[]
+  projectAccess   ProjectAccess[]
 
   @@unique([userId, organizationId])
   @@index([organizationId, status])

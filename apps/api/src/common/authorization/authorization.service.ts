@@ -61,4 +61,27 @@ export class AuthorizationService {
     });
     if (!membership) throw new ForbiddenException('No perteneces a esta organización');
   }
+
+  async requireProjectAccess(
+    userId: string,
+    organizationId: string,
+    projectId: string,
+    permissionKey: string,
+  ): Promise<void> {
+    const project = await this.prisma.project.findFirst({
+      where: { id: projectId, organizationId },
+      select: {
+        visibility: true,
+        accessGrants: {
+          where: { membership: { userId, status: MembershipStatus.ACTIVE } },
+          select: { membershipId: true },
+        },
+      },
+    });
+    if (!project) throw new ForbiddenException('Recurso no disponible');
+    if (project.visibility === 'PRIVATE' && project.accessGrants.length === 0) {
+      throw new ForbiddenException('No tienes acceso a este proyecto');
+    }
+    await this.requirePermission(userId, organizationId, permissionKey);
+  }
 }

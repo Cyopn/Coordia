@@ -53,6 +53,21 @@ test('authorization cannot cross organization boundaries', async () => {
       const authorization = new AuthorizationService(transaction as never);
       assert.equal(await authorization.hasPermission(userA.id, orgA.id, permission.key), true);
       assert.equal(await authorization.hasPermission(userA.id, orgB.id, permission.key), false);
+      const privateProject = await transaction.project.create({
+        data: {
+          organizationId: orgA.id,
+          name: `Private ${userA.id}`,
+          visibility: 'PRIVATE',
+        },
+      });
+      await assert.rejects(
+        authorization.requireProjectAccess(userB.id, orgA.id, privateProject.id, permission.key),
+        /No tienes acceso a este proyecto/,
+      );
+      await transaction.projectAccess.create({
+        data: { projectId: privateProject.id, membershipId: membershipA.id },
+      });
+      await authorization.requireProjectAccess(userA.id, orgA.id, privateProject.id, permission.key);
       await assert.rejects(
         authorization.requirePermission(userA.id, orgB.id, permission.key),
         /No tienes permiso/,
