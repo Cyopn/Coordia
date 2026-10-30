@@ -1,0 +1,23 @@
+{
+  "name": "coordia",
+  "private": true,
+  "packageManager": "pnpm@9.15.5",
+  "scripts": {
+    "build": "corepack pnpm --filter @coordia/web build && corepack pnpm --filter @coordia/api build",
+    "dev": "corepack pnpm --parallel --filter @coordia/web --filter @coordia/api dev",
+    "lint": "corepack pnpm --recursive lint",
+    "prisma:generate": "prisma generate --schema prisma/schema.prisma",
+    "prisma:migrate:deploy": "prisma migrate deploy --schema prisma/schema.prisma",
+    "prisma:seed": "corepack pnpm --filter @coordia/api exec tsx ../../prisma/seed.ts",
+    "prisma:validate": "prisma validate --schema prisma/schema.prisma",
+    "test": "corepack pnpm --recursive test",
+    "typecheck": "corepack pnpm --recursive typecheck"
+  },
+  "devDependencies": {
+    "prisma": "6.19.0",
+    "typescript": "5.7.3"
+  },
+  "dependencies": {
+    "@prisma/client": "6.19.0"
+  }
+}

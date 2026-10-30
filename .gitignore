@@ -1,0 +1,54 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Environment files and secrets
+.env
+.env.*
+!.env.example
+
+# Build output
+dist/
+build/
+out/
+.next/
+coverage/
+*.tsbuildinfo
+
+# Runtime and debug logs
+*.log
+logs/
+
+# Test and tool caches
+.cache/
+.turbo/
+.eslintcache
+
+# Prisma generated artifacts
+prisma/.generated/
+
+# Local databases and dumps
+*.sqlite
+*.sqlite3
+*.db
+*.dump
+*.sql.gz
+
+# Operating system files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+
+# Editors and IDEs
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/tasks.json
+!.vscode/launch.json
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
