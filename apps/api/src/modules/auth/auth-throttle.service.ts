@@ -16,7 +16,6 @@ export class AuthThrottleService {
     const now = new Date();
     const keys = [
       this.key(`email:${email}`),
-      this.key(`ip:${request.ip ?? 'unknown'}`),
       this.key(`combo:${email}:${request.ip ?? 'unknown'}`),
     ];
     const buckets = await this.prisma.authThrottle.findMany({ where: { key: { in: keys } } });
@@ -37,8 +36,18 @@ export class AuthThrottleService {
         .map((bucket) => bucket.failures),
     );
     if (failures >= this.maxFailures) {
-      await new Promise((resolve) =>
-        setTimeout(resolve, Math.min(5000, 250 * (failures - this.maxFailures + 1))),
+      const blockedUntil = new Date(now.getTime() + this.blockMs);
+      await this.prisma.authThrottle.updateMany({
+        where: { key: { in: keys }, resetAt: { gt: now }, failures: { gte: this.maxFailures } },
+        data: { blockedUntil },
+      });
+      await this.recordBlock(keys[0] ?? '', failures, request);
+      throw new HttpException(
+        {
+          message: 'Demasiados intentos. Inténtalo más tarde.',
+          retryAfter: Math.ceil(this.blockMs / 1000),
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
       );
     }
   }
@@ -56,7 +65,6 @@ export class AuthThrottleService {
         where: { key, resetAt: { gt: now } },
         data: {
           failures: { increment: 1 },
-          blockedUntil: undefined,
         },
       });
       if (updated.count === 0) {
@@ -76,6 +84,16 @@ export class AuthThrottleService {
           });
         }
       }
+      await this.prisma.securityEvent.create({
+        data: {
+          eventType: 'auth.attempt_failed',
+          severity: 'MEDIUM',
+          metadata: {
+            bucketHash: this.key(`email:${email}`),
+            ipHash: request.ip ? this.key(`ip:${request.ip}`) : null,
+          },
+        },
+      });
     }
   }
 
@@ -86,10 +104,13 @@ export class AuthThrottleService {
       `ip:${request.ip ?? 'unknown'}`,
       `combo:${email}:${request.ip ?? 'unknown'}`,
     ]) {
-      await this.prisma.authThrottle.updateMany({
+      const result = await this.prisma.authThrottle.updateMany({
         where: { key: this.key(value), failures: { gte: this.maxFailures }, blockedUntil: null },
         data: { blockedUntil },
       });
+      if (result.count > 0) {
+        await this.recordBlock(this.key(value), this.maxFailures, request);
+      }
     }
   }
 
@@ -99,8 +120,23 @@ export class AuthThrottleService {
         key: {
           in: [
             this.key(`email:${email}`),
+            this.key(`ip:${request.ip ?? 'unknown'}`),
             this.key(`combo:${email}:${request.ip ?? 'unknown'}`),
           ],
+        },
+      },
+    });
+  }
+
+  private async recordBlock(key: string, failures: number, request: Request): Promise<void> {
+    await this.prisma.securityEvent.create({
+      data: {
+        eventType: 'auth.throttle_blocked',
+        severity: 'HIGH',
+        metadata: {
+          bucketHash: key,
+          failures,
+          ipHash: request.ip ? this.key(`ip:${request.ip}`) : null,
         },
       },
     });

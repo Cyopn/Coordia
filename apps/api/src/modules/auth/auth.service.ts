@@ -168,11 +168,14 @@ export class AuthService {
 
   async verifyEmail(dto: VerifyEmailDto, request: Request) {
     const emailNormalized = this.normalizeEmail(dto.email);
+    await this.throttle.beforeAttempt(emailNormalized, request);
     const user = await this.prisma.user.findUnique({
       where: { emailNormalized },
       select: { id: true, status: true },
     });
     if (!user || user.status !== UserStatus.PENDING_VERIFICATION) {
+      await this.throttle.recordFailure(emailNormalized, request);
+      await this.throttle.blockIfThresholdReached(emailNormalized, request);
       throw new UnauthorizedException('Código no válido o expirado');
     }
     const token = await this.prisma.verificationToken.findFirst({
@@ -184,6 +187,8 @@ export class AuthService {
       orderBy: { createdAt: 'desc' },
     });
     if (!token || token.expiresAt <= new Date() || token.attempts >= 5) {
+      await this.throttle.recordFailure(emailNormalized, request);
+      await this.throttle.blockIfThresholdReached(emailNormalized, request);
       throw new UnauthorizedException('Código no válido o expirado');
     }
     if (this.tokens.hash(dto.code) !== token.tokenHash) {
@@ -328,6 +333,8 @@ export class AuthService {
   }
 
   async resetPassword(dto: ResetPasswordDto, request: Request) {
+    const throttleKey = `reset:${this.tokens.hash(dto.token)}`;
+    await this.throttle.beforeAttempt(throttleKey, request);
     const token = await this.prisma.passwordResetToken.findFirst({
       where: {
         tokenHash: this.tokens.hash(dto.token),
@@ -335,8 +342,8 @@ export class AuthService {
       },
     });
     if (!token || token.expiresAt <= new Date()) {
-      await this.throttle.recordFailure('reset-token', request);
-      await this.throttle.blockIfThresholdReached('reset-token', request);
+      await this.throttle.recordFailure(throttleKey, request);
+      await this.throttle.blockIfThresholdReached(throttleKey, request);
       throw new UnauthorizedException('Enlace no válido o expirado');
     }
     const userId = token.userId;
@@ -390,7 +397,7 @@ export class AuthService {
         },
       });
     });
-    await this.throttle.clear('reset-token', request);
+    await this.throttle.clear(throttleKey, request);
     return { message: 'Contraseña actualizada correctamente.' };
   }
 
@@ -458,6 +465,7 @@ export class AuthService {
     const userId = await this.sessions.requireUser(request);
     const targetEmail = dto.newEmail.trim();
     const targetNormalized = this.normalizeEmail(targetEmail);
+    await this.throttle.beforeAttempt(`email-change:${targetNormalized}`, request);
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
       select: { email: true, emailNormalized: true, passwordHash: true },
@@ -518,16 +526,21 @@ export class AuthService {
       targetEmail,
       `${baseUrl}/change-email?token=${encodeURIComponent(rawToken)}`,
     );
+    await this.throttle.clear(`email-change:${targetNormalized}`, request);
     return { message: 'Hemos enviado un enlace de confirmación al nuevo correo.' };
   }
 
   async confirmEmailChange(dto: ConfirmEmailChangeDto, request: Request) {
     const userId = await this.sessions.requireUser(request);
     const tokenHash = this.tokens.hash(dto.token);
+    const throttleKey = `email-change-token:${tokenHash}`;
+    await this.throttle.beforeAttempt(throttleKey, request);
     const token = await this.prisma.emailChangeToken.findFirst({
       where: { userId, tokenHash, usedAt: null },
     });
     if (!token || token.expiresAt <= new Date()) {
+      await this.throttle.recordFailure(throttleKey, request);
+      await this.throttle.blockIfThresholdReached(throttleKey, request);
       throw new UnauthorizedException('Enlace no válido o expirado');
     }
     const currentToken = request.cookies?.[
@@ -571,6 +584,7 @@ export class AuthService {
         },
       });
     });
+    await this.throttle.clear(throttleKey, request);
     return { message: 'Correo electrónico actualizado correctamente.' };
   }
 

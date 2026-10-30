@@ -20,6 +20,10 @@ export class AuthCleanupService implements OnModuleInit, OnModuleDestroy {
   private async cleanup(): Promise<void> {
     const now = new Date();
     const pendingCutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const auditCutoff = new Date(
+      Date.now() -
+        Number(process.env.AUDIT_RETENTION_DAYS ?? 180) * 24 * 60 * 60 * 1000,
+    );
     await this.prisma.$transaction([
       this.prisma.user.deleteMany({
         where: { status: 'PENDING_VERIFICATION', createdAt: { lt: pendingCutoff } },
@@ -41,6 +45,12 @@ export class AuthCleanupService implements OnModuleInit, OnModuleDestroy {
       }),
       this.prisma.authThrottle.deleteMany({
         where: { resetAt: { lt: now } },
+      }),
+      this.prisma.auditEvent.deleteMany({
+        where: { createdAt: { lt: auditCutoff } },
+      }),
+      this.prisma.securityEvent.deleteMany({
+        where: { createdAt: { lt: auditCutoff } },
       }),
     ]);
   }

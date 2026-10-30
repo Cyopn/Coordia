@@ -1,6 +1,5 @@
 import { ForbiddenException, Injectable } from '@nestjs/common';
 import { MembershipStatus } from '@prisma/client';
-import { PERMISSIONS } from '@coordia/shared';
 import { PrismaService } from '../database/prisma.service';
 
 @Injectable()
@@ -28,17 +27,7 @@ export class AuthorizationService {
               permissions: {
                 some: {
                   permission: {
-                    key: {
-                      in: [
-                        permissionKey,
-                        ...(permissionKey.startsWith('project:')
-                          ? [PERMISSIONS.PROJECT_MANAGE]
-                          : []),
-                        ...(permissionKey.startsWith('resource:')
-                          ? [PERMISSIONS.PROJECT_MANAGE]
-                          : []),
-                      ],
-                    },
+                    key: permissionKey,
                   },
                 },
               },

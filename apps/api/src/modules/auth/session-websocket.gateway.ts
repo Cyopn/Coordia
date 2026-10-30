@@ -7,7 +7,12 @@ import { PrismaService } from '../../common/database/prisma.service';
 import { SessionRevocationService } from './session-revocation.service';
 import { TokenService } from './token.service';
 
-type Connection = { sessionId: string; socket: WebSocket; unsubscribe: () => void };
+type Connection = {
+  sessionId: string;
+  socket: WebSocket;
+  unsubscribe: () => void;
+  validationTimer: NodeJS.Timeout;
+};
 
 @Injectable()
 export class SessionWebSocketGateway implements OnModuleDestroy {
@@ -62,10 +67,13 @@ export class SessionWebSocketGateway implements OnModuleDestroy {
       socket.close(1008, 'Sesión no válida');
       return;
     }
-    const session = await this.prisma.session.findUnique({
-      where: { tokenHash: this.tokens.hash(rawToken) },
-      select: { id: true, status: true, expiresAt: true },
-    });
+    let session;
+    try {
+      session = await this.findActiveSession(rawToken);
+    } catch {
+      socket.close(1011, 'No se pudo validar la sesión');
+      return;
+    }
     if (!session || session.status !== 'ACTIVE' || session.expiresAt <= new Date()) {
       socket.close(1008, 'Sesión no válida');
       return;
@@ -74,11 +82,41 @@ export class SessionWebSocketGateway implements OnModuleDestroy {
       sessionId: session.id,
       socket,
       unsubscribe: () => undefined,
+      validationTimer: setInterval(() => {
+        void this.validateConnection(connection, rawToken);
+      }, 30_000),
     };
     this.connections.add(connection);
-    connection.unsubscribe = () => this.connections.delete(connection);
+    connection.unsubscribe = () => {
+      clearInterval(connection.validationTimer);
+      this.connections.delete(connection);
+    };
     socket.once('close', connection.unsubscribe);
     socket.send(JSON.stringify({ type: 'session.connected' }));
+  }
+
+  private async validateConnection(connection: Connection, rawToken: string): Promise<void> {
+    if (connection.socket.readyState !== WebSocket.OPEN) return;
+    let session;
+    try {
+      session = await this.findActiveSession(rawToken);
+    } catch {
+      connection.socket.close(1011, 'No se pudo validar la sesión');
+      return;
+    }
+    if (!session) {
+      connection.socket.close(4001, 'Sesión revocada');
+    }
+  }
+
+  private async findActiveSession(rawToken: string) {
+    const session = await this.prisma.session.findUnique({
+      where: { tokenHash: this.tokens.hash(rawToken) },
+      select: { id: true, status: true, expiresAt: true },
+    });
+    return session && session.status === 'ACTIVE' && session.expiresAt > new Date()
+      ? session
+      : null;
   }
 
 }

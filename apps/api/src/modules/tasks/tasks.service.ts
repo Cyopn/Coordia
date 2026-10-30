@@ -87,7 +87,7 @@ export class TasksService {
     const userId = await this.requirePermission(
       organizationId,
       request,
-      PERMISSIONS.PROJECT_MANAGE,
+      PERMISSIONS.RESOURCE_CREATE,
     );
     try {
       const label = await this.prisma.label.create({
@@ -123,7 +123,7 @@ export class TasksService {
     const userId = await this.requirePermission(
       organizationId,
       request,
-      PERMISSIONS.PROJECT_MANAGE,
+      PERMISSIONS.RESOURCE_CREATE,
     );
     await this.projectInOrganization(organizationId, projectId);
     if (dto.parentTaskId === undefined && dto.dependsOnIds?.includes(dto.parentTaskId ?? '')) {
@@ -217,7 +217,7 @@ export class TasksService {
     const userId = await this.requirePermission(
       organizationId,
       request,
-      PERMISSIONS.PROJECT_MANAGE,
+      PERMISSIONS.RESOURCE_UPDATE,
     );
     await this.projectInOrganization(organizationId, projectId);
     const task = await this.prisma.task.findFirst({

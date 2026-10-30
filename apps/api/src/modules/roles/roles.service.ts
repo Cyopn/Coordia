@@ -24,7 +24,7 @@ export class RolesService {
 
   async list(organizationId: string, request: Request) {
     const userId = await this.sessions.requireUser(request);
-    await this.authorization.requireMembership(userId, organizationId);
+    await this.authorization.requirePermission(userId, organizationId, PERMISSIONS.ROLE_READ);
     return this.prisma.role.findMany({
       where: { organizationId },
       select: {
@@ -46,7 +46,7 @@ export class RolesService {
     await this.authorization.requirePermission(
       userId,
       organizationId,
-      PERMISSIONS.ROLE_MANAGE,
+      PERMISSIONS.ROLE_CREATE,
     );
     this.validatePermissionKeys(dto.permissionKeys);
     try {
@@ -101,7 +101,7 @@ export class RolesService {
     await this.authorization.requirePermission(
       userId,
       organizationId,
-      PERMISSIONS.ROLE_MANAGE,
+      PERMISSIONS.ROLE_UPDATE,
     );
     this.validatePermissionKeys(dto.permissionKeys);
     const role = await this.prisma.role.findFirst({

@@ -164,6 +164,8 @@ export class MfaService {
     request: Request,
     response: Response,
   ) {
+    const throttleKey = `mfa-challenge:${this.tokens.hash(challengeToken)}`;
+    await this.throttle.beforeAttempt(throttleKey, request);
     const challenge = await this.prisma.mfaChallenge.findUnique({
       where: { tokenHash: this.tokens.hash(challengeToken) },
     });
@@ -173,6 +175,8 @@ export class MfaService {
       challenge.expiresAt <= new Date() ||
       challenge.attempts >= 5
     ) {
+      await this.throttle.recordFailure(throttleKey, request);
+      await this.throttle.blockIfThresholdReached(throttleKey, request);
       throw new UnauthorizedException('Desafío MFA no válido o expirado');
     }
 
@@ -205,6 +209,7 @@ export class MfaService {
       },
     });
     await this.throttle.clear(`mfa:${challenge.userId}`, request);
+    await this.throttle.clear(throttleKey, request);
     return { message: 'Inicio de sesión correcto.' };
   }
 

@@ -45,7 +45,7 @@ export class ProjectsService {
     const userId = await this.userWithPermission(
       organizationId,
       request,
-      PERMISSIONS.PROJECT_MANAGE,
+      PERMISSIONS.PROJECT_CREATE,
     );
     if (dto.startsAt && dto.endsAt && new Date(dto.endsAt) < new Date(dto.startsAt)) {
       throw new ConflictException('La fecha de finalización no puede preceder a la de inicio');
@@ -86,7 +86,7 @@ export class ProjectsService {
     const userId = await this.userWithPermission(
       organizationId,
       request,
-      PERMISSIONS.PROJECT_MANAGE,
+      PERMISSIONS.PROJECT_UPDATE,
     );
     await this.projectInOrganization(organizationId, projectId);
     if (dto.startsAt && dto.endsAt && new Date(dto.endsAt) < new Date(dto.startsAt)) {
@@ -119,7 +119,7 @@ export class ProjectsService {
     const userId = await this.userWithPermission(
       organizationId,
       request,
-      PERMISSIONS.PROJECT_MANAGE,
+      PERMISSIONS.PROJECT_UPDATE,
     );
     await this.projectInOrganization(organizationId, projectId);
     try {
@@ -158,7 +158,7 @@ export class ProjectsService {
     const userId = await this.userWithPermission(
       organizationId,
       request,
-      PERMISSIONS.PROJECT_MANAGE,
+      PERMISSIONS.PROJECT_UPDATE,
     );
     await this.projectInOrganization(organizationId, projectId);
     const objective = await this.prisma.objective.findFirst({
