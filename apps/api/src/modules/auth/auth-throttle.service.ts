@@ -1,4 +1,4 @@
-import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
+import { HttpException, HttpStatus, Inject, Injectable } from '@nestjs/common';
 import { Request } from 'express';
 import { createHash } from 'node:crypto';
 import { PrismaService } from '../../common/database/prisma.service';
@@ -9,7 +9,7 @@ export class AuthThrottleService {
   private readonly maxFailures = Number(process.env.AUTH_THROTTLE_MAX_FAILURES ?? 10);
   private readonly blockMs = Number(process.env.AUTH_THROTTLE_BLOCK_MS ?? 15 * 60 * 1000);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
 
   async beforeAttempt(email: string, request: Request): Promise<void> {
     const now = new Date();

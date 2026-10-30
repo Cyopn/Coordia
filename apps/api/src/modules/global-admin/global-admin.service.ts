@@ -1,4 +1,10 @@
-import { ConflictException, Injectable, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
+import {
+  ConflictException,
+  Inject,
+  Injectable,
+  ServiceUnavailableException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { Request } from 'express';
 import { createHash, timingSafeEqual } from 'node:crypto';
@@ -11,10 +17,10 @@ import { AuthThrottleService } from '../auth/auth-throttle.service';
 @Injectable()
 export class GlobalAdminService {
   constructor(
-    private readonly prisma: PrismaService,
-    private readonly passwords: PasswordService,
-    private readonly mfa: MfaService,
-    private readonly throttle: AuthThrottleService,
+    @Inject(PrismaService) private readonly prisma: PrismaService,
+    @Inject(PasswordService) private readonly passwords: PasswordService,
+    @Inject(MfaService) private readonly mfa: MfaService,
+    @Inject(AuthThrottleService) private readonly throttle: AuthThrottleService,
   ) {}
 
   async bootstrap(dto: BootstrapGlobalAdminDto, request: Request) {

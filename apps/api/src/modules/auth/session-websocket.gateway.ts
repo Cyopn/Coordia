@@ -9,6 +9,7 @@ import { TokenService } from './token.service';
 
 type Connection = {
   sessionId: string;
+  userId: string;
   socket: WebSocket;
   unsubscribe: () => void;
   validationTimer: NodeJS.Timeout;
@@ -80,11 +81,12 @@ export class SessionWebSocketGateway implements OnModuleDestroy {
     }
     const connection: Connection = {
       sessionId: session.id,
+      userId: session.userId,
       socket,
       unsubscribe: () => undefined,
       validationTimer: setInterval(() => {
         void this.validateConnection(connection, rawToken);
-      }, 30_000),
+      }, Number(process.env.SESSION_WEBSOCKET_VALIDATE_MS ?? 30_000)),
     };
     this.connections.add(connection);
     connection.unsubscribe = () => {
@@ -112,9 +114,18 @@ export class SessionWebSocketGateway implements OnModuleDestroy {
   private async findActiveSession(rawToken: string) {
     const session = await this.prisma.session.findUnique({
       where: { tokenHash: this.tokens.hash(rawToken) },
-      select: { id: true, status: true, expiresAt: true },
+      select: {
+        id: true,
+        userId: true,
+        status: true,
+        expiresAt: true,
+        user: { select: { status: true } },
+      },
     });
-    return session && session.status === 'ACTIVE' && session.expiresAt > new Date()
+    return session &&
+      session.user.status === 'ACTIVE' &&
+      session.status === 'ACTIVE' &&
+      session.expiresAt > new Date()
       ? session
       : null;
   }

@@ -1,10 +1,10 @@
-import { ForbiddenException, Injectable } from '@nestjs/common';
+import { ForbiddenException, Inject, Injectable } from '@nestjs/common';
 import { MembershipStatus } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 
 @Injectable()
 export class AuthorizationService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
 
   async hasPermission(
     userId: string,

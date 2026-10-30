@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Inject, Param, Post, Req, forwardRef } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Inject, Param, Post, Req, forwardRef } from '@nestjs/common';
 import { Request } from 'express';
 import { CreateOrganizationDto } from './dto/create-organization.dto';
 import { AcceptInvitationDto } from './dto/accept-invitation.dto';
@@ -43,5 +43,14 @@ export class OrganizationsController {
     @Req() request: Request,
   ) {
     return this.organizations.revoke(organizationId, invitationId, request);
+  }
+
+  @Delete(':organizationId/members/:membershipId')
+  removeMember(
+    @Param('organizationId') organizationId: string,
+    @Param('membershipId') membershipId: string,
+    @Req() request: Request,
+  ) {
+    return this.organizations.removeMember(organizationId, membershipId, request);
   }
 }

@@ -148,7 +148,6 @@ export class SessionService {
       where: {
         id: session.id,
         status: SessionStatus.ACTIVE,
-        lastActivityAt: session.lastActivityAt,
       },
       data: { lastActivityAt: new Date() },
     });
@@ -216,6 +215,18 @@ export class SessionService {
         status: SessionStatus.ACTIVE,
         NOT: { tokenHash: this.tokens.hash(rawToken) },
       },
+      data: { status: SessionStatus.REVOKED, revokedAt: new Date() },
+    });
+    this.revocations.notify(sessions.map(({ id }) => id));
+  }
+
+  async revokeUserSessions(userId: string): Promise<void> {
+    const sessions = await this.prisma.session.findMany({
+      where: { userId, status: SessionStatus.ACTIVE },
+      select: { id: true },
+    });
+    await this.prisma.session.updateMany({
+      where: { userId, status: SessionStatus.ACTIVE },
       data: { status: SessionStatus.REVOKED, revokedAt: new Date() },
     });
     this.revocations.notify(sessions.map(({ id }) => id));

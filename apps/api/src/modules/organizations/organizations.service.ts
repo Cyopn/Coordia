@@ -272,4 +272,40 @@ export class OrganizationsService {
     });
     return { message: 'Invitación revocada' };
   }
+
+  async removeMember(
+    organizationId: string,
+    membershipId: string,
+    request: Request,
+  ) {
+    const actorId = await this.sessions.requireUser(request);
+    await this.authorization.requirePermission(
+      actorId,
+      organizationId,
+      PERMISSIONS.MEMBERSHIP_REMOVE,
+    );
+    const membership = await this.prisma.membership.findFirst({
+      where: { id: membershipId, organizationId, status: MembershipStatus.ACTIVE },
+      select: { id: true, userId: true },
+    });
+    if (!membership) throw new NotFoundException('Membresía no encontrada');
+    await this.prisma.$transaction([
+      this.prisma.membership.update({
+        where: { id: membership.id },
+        data: { status: MembershipStatus.REMOVED },
+      }),
+      this.prisma.auditEvent.create({
+        data: {
+          organizationId,
+          actorId,
+          action: 'membership.removed',
+          resourceType: 'membership',
+          resourceId: membership.id,
+          result: 'SUCCESS',
+        },
+      }),
+    ]);
+    await this.sessions.revokeUserSessions(membership.userId);
+    return { message: 'Membresía retirada' };
+  }
 }

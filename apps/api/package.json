@@ -5,7 +5,7 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsx watch src/main.ts",
     "lint": "tsc --noEmit -p tsconfig.json",
-    "test": "tsx --test ../../tests/unit/auth-primitives.test.ts ../../tests/unit/auth-throttle.test.ts ../../tests/unit/csrf.test.ts ../../tests/unit/mfa-crypto.test.ts ../../tests/unit/session-revocation.test.ts ../../tests/integration/tenant-isolation.test.ts",
+    "test": "tsx --test ../../tests/unit/auth-primitives.test.ts ../../tests/unit/auth-throttle.test.ts ../../tests/unit/csrf.test.ts ../../tests/unit/mfa-crypto.test.ts ../../tests/unit/session-revocation.test.ts ../../tests/integration/tenant-isolation.test.ts ../../tests/integration/http-isolation.test.ts ../../tests/integration/websocket-sessions.test.ts ../../tests/integration/global-admin-concurrency.test.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
