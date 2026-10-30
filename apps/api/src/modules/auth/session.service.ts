@@ -4,6 +4,7 @@ import { Request, Response } from 'express';
 import { PrismaService } from '../../common/database/prisma.service';
 import { EmailService } from '../email/email.service';
 import { TokenService } from './token.service';
+import { SessionRevocationService } from './session-revocation.service';
 
 @Injectable()
 export class SessionService {
@@ -19,6 +20,7 @@ export class SessionService {
     private readonly tokens: TokenService,
     @Inject(EmailService)
     private readonly email: EmailService,
+    private readonly revocations: SessionRevocationService,
   ) {}
 
   async create(
@@ -49,8 +51,24 @@ export class SessionService {
       });
     }
     const now = Date.now();
+    const administrativeMembership = await this.prisma.membership.findFirst({
+      where: {
+        userId,
+        status: 'ACTIVE',
+        roles: { some: { role: { name: { in: ['Propietario', 'Administrador'] } } } },
+      },
+      select: { id: true },
+    });
     const expiresAt = new Date(
-      now + Number(process.env.SESSION_MAX_HOURS ?? 12) * 60 * 60 * 1000,
+      now +
+        Number(
+          administrativeMembership
+            ? process.env.ADMIN_SESSION_MAX_HOURS ?? 8
+            : process.env.SESSION_MAX_HOURS ?? 12,
+        ) *
+          60 *
+          60 *
+          1000,
     );
     await this.prisma.session.create({
       data: {
@@ -107,9 +125,11 @@ export class SessionService {
     if (!rawToken) throw new UnauthorizedException('Sesión no válida');
     const session = await this.prisma.session.findUnique({
       where: { tokenHash: this.tokens.hash(rawToken) },
+      include: { user: { select: { status: true } } },
     });
     if (
       !session ||
+      session.user.status !== 'ACTIVE' ||
       session.status !== SessionStatus.ACTIVE ||
       session.expiresAt <= new Date()
     ) {
@@ -124,20 +144,30 @@ export class SessionService {
       });
       throw new UnauthorizedException('Sesión no válida');
     }
-    await this.prisma.session.update({
-      where: { id: session.id },
+    const refreshed = await this.prisma.session.updateMany({
+      where: {
+        id: session.id,
+        status: SessionStatus.ACTIVE,
+        lastActivityAt: session.lastActivityAt,
+      },
       data: { lastActivityAt: new Date() },
     });
+    if (refreshed.count !== 1) throw new UnauthorizedException('Sesión no válida');
     return session.userId;
   }
 
   async revoke(request: Request, response: Response): Promise<void> {
     const rawToken = request.cookies?.[this.cookieName] as string | undefined;
     if (rawToken) {
+      const session = await this.prisma.session.findUnique({
+        where: { tokenHash: this.tokens.hash(rawToken) },
+        select: { id: true },
+      });
       await this.prisma.session.updateMany({
         where: { tokenHash: this.tokens.hash(rawToken), status: SessionStatus.ACTIVE },
         data: { status: SessionStatus.REVOKED, revokedAt: new Date() },
       });
+      if (session) this.revocations.notify([session.id]);
     }
     response.clearCookie(this.cookieName, { httpOnly: true, sameSite: 'lax', path: '/' });
   }
@@ -165,12 +195,21 @@ export class SessionService {
       data: { status: SessionStatus.REVOKED, revokedAt: new Date() },
     });
     if (result.count === 0) throw new UnauthorizedException('Sesión no válida');
+    this.revocations.notify([sessionId]);
   }
 
   async revokeOthers(request: Request): Promise<void> {
     const userId = await this.requireUser(request);
     const rawToken = request.cookies?.[this.cookieName] as string | undefined;
     if (!rawToken) throw new UnauthorizedException('Sesión no válida');
+    const sessions = await this.prisma.session.findMany({
+      where: {
+        userId,
+        status: SessionStatus.ACTIVE,
+        NOT: { tokenHash: this.tokens.hash(rawToken) },
+      },
+      select: { id: true },
+    });
     await this.prisma.session.updateMany({
       where: {
         userId,
@@ -179,5 +218,6 @@ export class SessionService {
       },
       data: { status: SessionStatus.REVOKED, revokedAt: new Date() },
     });
+    this.revocations.notify(sessions.map(({ id }) => id));
   }
 }

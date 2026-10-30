@@ -57,4 +57,17 @@ export class EmailService {
       },
     });
   }
+
+  sendEmailChangeVerification(to: string, link: string): Promise<void> {
+    return this.provider.send({
+      to,
+      templateId: process.env.EMAILJS_GENERAL_TEMPLATE_ID ?? '',
+      variables: {
+        notification_type: 'Cambio de correo electrónico',
+        subject: 'Confirma tu nuevo correo de Coordia',
+        message: 'Confirma el cambio de correo electrónico desde el siguiente enlace.',
+        action_link: link,
+      },
+    });
+  }
 }

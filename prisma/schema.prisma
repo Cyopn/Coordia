@@ -46,6 +46,7 @@ enum MfaFactorStatus {
 enum TokenType {
   EMAIL_VERIFICATION
   PASSWORD_RESET
+  EMAIL_CHANGE
 }
 
 enum AuditResult {
@@ -102,6 +103,8 @@ model User {
   createdInvitations  OrganizationInvitation[] @relation("InvitationCreator")
   verificationTokens  VerificationToken[]
   passwordResetTokens PasswordResetToken[]
+  emailChangeTokens  EmailChangeToken[]
+  isGlobalAdmin      Boolean                  @default(false)
   mfaChallenges      MfaChallenge[]
 }
 
@@ -462,6 +465,21 @@ model PasswordResetToken {
   @@index([userId, expiresAt])
 }
 
+model EmailChangeToken {
+  id              String    @id @default(uuid()) @db.Uuid
+  userId          String    @db.Uuid
+  targetEmail     String
+  targetNormalized String
+  tokenHash       String    @unique
+  expiresAt       DateTime
+  usedAt          DateTime?
+  createdAt       DateTime  @default(now())
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@index([targetNormalized])
+}
+
 model AuditEvent {
   id             String        @id @default(uuid()) @db.Uuid
   organizationId String?       @db.Uuid
@@ -493,4 +511,21 @@ model SecurityEvent {
 
   @@index([organizationId, createdAt])
   @@index([eventType, createdAt])
+}
+
+model AuthThrottle {
+  key        String   @id
+  failures   Int      @default(0)
+  resetAt    DateTime
+  updatedAt  DateTime @updatedAt
+
+  @@index([resetAt])
+}
+
+model GlobalAdminBootstrap {
+  id            String    @id
+  completedAt   DateTime?
+  initializedBy String?   @db.Uuid
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 }

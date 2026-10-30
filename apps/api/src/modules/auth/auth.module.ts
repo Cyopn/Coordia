@@ -6,16 +6,24 @@ import { AuthService } from './auth.service';
 import { PasswordService } from './password.service';
 import { SessionService } from './session.service';
 import { TokenService } from './token.service';
+import { AuthThrottleService } from './auth-throttle.service';
+import { AuthCleanupService } from './auth-cleanup.service';
+import { SessionRevocationService } from './session-revocation.service';
+import { SessionWebSocketGateway } from './session-websocket.gateway';
 
 @Module({
   imports: [EmailModule, forwardRef(() => MfaModule)],
   controllers: [AuthController],
   providers: [
     AuthService,
+    AuthThrottleService,
+    AuthCleanupService,
+    SessionRevocationService,
+    SessionWebSocketGateway,
     PasswordService,
     SessionService,
     TokenService,
   ],
-  exports: [SessionService, PasswordService, TokenService],
+  exports: [SessionService, PasswordService, TokenService, SessionRevocationService, SessionWebSocketGateway],
 })
 export class AuthModule {}

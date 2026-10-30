@@ -9,6 +9,7 @@ import { AuditModule } from './modules/audit/audit.module';
 import { TeamsModule } from './modules/teams/teams.module';
 import { ProjectsModule } from './modules/projects/projects.module';
 import { TasksModule } from './modules/tasks/tasks.module';
+import { GlobalAdminModule } from './modules/global-admin/global-admin.module';
 
 @Controller('health')
 class HealthController {
@@ -30,6 +31,7 @@ class HealthController {
     TeamsModule,
     ProjectsModule,
     TasksModule,
+    GlobalAdminModule,
   ],
   controllers: [HealthController],
 })

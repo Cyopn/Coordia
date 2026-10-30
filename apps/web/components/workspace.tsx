@@ -2,6 +2,7 @@
 
 import { FormEvent, useEffect, useState } from 'react';
 import { apiRequest } from '../lib/api-client';
+import Link from 'next/link';
 
 type Organization = { id: string; name: string };
 type Project = { id: string; name: string; status: string };
@@ -214,6 +215,7 @@ export function Workspace() {
   return (
     <main className="workspace-page">
       <header className="workspace-header">
+        <Link href="/security">Seguridad de la cuenta</Link>
         <div>
           <p className="eyebrow">Coordia / Espacio de trabajo</p>
           <h1>Trabajo del equipo</h1>

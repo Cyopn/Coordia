@@ -7,6 +7,9 @@ import { ResendVerificationDto } from './dto/resend-verification.dto';
 import { RequestPasswordResetDto } from './dto/request-password-reset.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
+import { RequestEmailChangeDto } from './dto/request-email-change.dto';
+import { ConfirmEmailChangeDto } from './dto/confirm-email-change.dto';
 import { SessionService } from './session.service';
 
 @Controller('auth')
@@ -50,6 +53,21 @@ export class AuthController {
   @Post('reset-password')
   resetPassword(@Body() dto: ResetPasswordDto) {
     return this.auth.resetPassword(dto);
+  }
+
+  @Post('change-password')
+  changePassword(@Body() dto: ChangePasswordDto, @Req() request: Request) {
+    return this.auth.changePassword(dto, request);
+  }
+
+  @Post('request-email-change')
+  requestEmailChange(@Body() dto: RequestEmailChangeDto, @Req() request: Request) {
+    return this.auth.requestEmailChange(dto, request);
+  }
+
+  @Post('confirm-email-change')
+  confirmEmailChange(@Body() dto: ConfirmEmailChangeDto, @Req() request: Request) {
+    return this.auth.confirmEmailChange(dto, request);
   }
 
   @Post('logout')

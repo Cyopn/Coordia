@@ -64,18 +64,22 @@ export class MfaService {
       throw new UnauthorizedException('Código MFA no válido');
     }
     const recoveryCodes = Array.from({ length: 10 }, () => this.tokens.createToken(9));
-    await this.prisma.$transaction([
-      this.prisma.mfaFactor.update({
-        where: { id: factor.id },
-        data: { status: MfaFactorStatus.ACTIVE, activatedAt: new Date() },
-      }),
-      this.prisma.mfaRecoveryCode.createMany({
+    const activatedAt = new Date();
+    await this.prisma.$transaction(async (transaction) => {
+      const activated = await transaction.mfaFactor.updateMany({
+        where: { id: factor.id, userId, status: MfaFactorStatus.PENDING },
+        data: { status: MfaFactorStatus.ACTIVE, activatedAt },
+      });
+      if (activated.count !== 1) {
+        throw new ConflictException('El factor MFA ya no está disponible');
+      }
+      await transaction.mfaRecoveryCode.createMany({
         data: recoveryCodes.map((codeValue) => ({
           factorId: factor.id,
           codeHash: this.tokens.hash(codeValue),
         })),
-      }),
-      this.prisma.auditEvent.create({
+      });
+      await transaction.auditEvent.create({
         data: {
           actorId: userId,
           action: 'mfa.activated',
@@ -83,8 +87,8 @@ export class MfaService {
           resourceId: factor.id,
           result: 'SUCCESS',
         },
-      }),
-    ]);
+      });
+    });
     return { recoveryCodes };
   }
 
@@ -99,6 +103,17 @@ export class MfaService {
     });
     if (!factor || !(await this.validCode(factor.secretCiphertext, code))) {
       throw new UnauthorizedException('Código MFA no válido');
+    }
+    const isAdministrative = await this.prisma.membership.findFirst({
+      where: {
+        userId,
+        status: 'ACTIVE',
+        roles: { some: { role: { name: { in: ['Propietario', 'Administrador'] } } } },
+      },
+      select: { id: true },
+    });
+    if (isAdministrative) {
+      throw new ConflictException('Las cuentas administrativas deben conservar MFA activo');
     }
     await this.prisma.mfaFactor.update({
       where: { id: factor.id },

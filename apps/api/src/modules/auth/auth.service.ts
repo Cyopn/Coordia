@@ -6,7 +6,7 @@ import {
   forwardRef,
   Inject,
 } from '@nestjs/common';
-import { TokenType, UserStatus } from '@prisma/client';
+import { Prisma, TokenType, UserStatus } from '@prisma/client';
 import { Request, Response } from 'express';
 import { PrismaService } from '../../common/database/prisma.service';
 import { EmailService } from '../email/email.service';
@@ -16,6 +16,10 @@ import { ResendVerificationDto } from './dto/resend-verification.dto';
 import { RequestPasswordResetDto } from './dto/request-password-reset.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
+import { AuthThrottleService } from './auth-throttle.service';
+import { RequestEmailChangeDto } from './dto/request-email-change.dto';
+import { ConfirmEmailChangeDto } from './dto/confirm-email-change.dto';
 import { PasswordService } from './password.service';
 import { SessionService } from './session.service';
 import { TokenService } from './token.service';
@@ -36,59 +40,67 @@ export class AuthService {
     private readonly email: EmailService,
     @Inject(forwardRef(() => MfaService))
     private readonly mfa: MfaService,
+    private readonly throttle: AuthThrottleService,
   ) {}
 
   async register(dto: RegisterDto, request: Request) {
     const emailNormalized = this.normalizeEmail(dto.email);
+    const genericMessage = { message: 'Si los datos son válidos, recibirás instrucciones por correo.' };
     const existing = await this.prisma.user.findUnique({
       where: { emailNormalized },
       select: { id: true },
     });
     if (existing) {
-      throw new ConflictException(
-        'El correo electrónico ya está registrado y no se puede utilizar',
-      );
+      return genericMessage;
     }
 
     this.passwords.assertNotCommon(dto.password);
     const passwordHash = await this.passwords.hash(dto.password);
     const code = this.tokens.createCode();
-    const user = await this.prisma.$transaction(async (transaction) => {
-      const created = await transaction.user.create({
-        data: {
-          email: dto.email.trim(),
-          emailNormalized,
-          passwordHash,
-          passwordHistory: { create: { passwordHash } },
-          consentRecords: {
-            create: {
-              termsVersion: dto.termsVersion,
-              privacyVersion: dto.privacyVersion,
-              ipAddressHash: request.ip ? this.tokens.hash(request.ip) : undefined,
-              userAgent: dto.userAgent || undefined,
+    let user: { id: string; email: string };
+    try {
+      user = await this.prisma.$transaction(async (transaction) => {
+        const created = await transaction.user.create({
+          data: {
+            email: dto.email.trim(),
+            emailNormalized,
+            passwordHash,
+            passwordHistory: { create: { passwordHash } },
+            consentRecords: {
+              create: {
+                termsVersion: dto.termsVersion,
+                privacyVersion: dto.privacyVersion,
+                ipAddressHash: request.ip ? this.tokens.hash(request.ip) : undefined,
+                userAgent: dto.userAgent || undefined,
+              },
+            },
+            verificationTokens: {
+              create: {
+                type: TokenType.EMAIL_VERIFICATION,
+                tokenHash: this.tokens.hash(code),
+                expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+              },
             },
           },
-          verificationTokens: {
-            create: {
-              type: TokenType.EMAIL_VERIFICATION,
-              tokenHash: this.tokens.hash(code),
-              expiresAt: new Date(Date.now() + 10 * 60 * 1000),
-            },
+          select: { id: true, email: true },
+        });
+        await transaction.auditEvent.create({
+          data: {
+            actorId: created.id,
+            action: 'account.registered',
+            resourceType: 'user',
+            resourceId: created.id,
+            result: 'SUCCESS',
           },
-        },
-        select: { id: true, email: true },
+        });
+        return created;
       });
-      await transaction.auditEvent.create({
-        data: {
-          actorId: created.id,
-          action: 'account.registered',
-          resourceType: 'user',
-          resourceId: created.id,
-          result: 'SUCCESS',
-        },
-      });
-      return created;
-    });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        return genericMessage;
+      }
+      throw error;
+    }
     try {
       await this.email.sendVerification(user.email, code);
     } catch (error) {
@@ -108,13 +120,22 @@ export class AuthService {
       where: { emailNormalized: this.normalizeEmail(dto.email) },
       select: { id: true, email: true, status: true },
     });
-    if (!user) {
-      throw new NotFoundException(
-        'No existe una cuenta pendiente asociada a este correo electrónico',
-      );
+    const genericMessage = 'Si la cuenta puede verificarse, recibirás un nuevo código por correo.';
+    if (!user || user.status !== UserStatus.PENDING_VERIFICATION) {
+      return { message: genericMessage };
     }
-    if (user.status !== UserStatus.PENDING_VERIFICATION) {
-      throw new ConflictException('Esta cuenta ya está verificada o no puede verificarse');
+
+    const latestToken = await this.prisma.verificationToken.findFirst({
+      where: {
+        userId: user.id,
+        type: TokenType.EMAIL_VERIFICATION,
+        invalidatedAt: null,
+      },
+      orderBy: { createdAt: 'desc' },
+      select: { createdAt: true },
+    });
+    if (latestToken && latestToken.createdAt.getTime() + 60_000 > Date.now()) {
+      return { message: genericMessage };
     }
 
     const code = this.tokens.createCode();
@@ -137,7 +158,7 @@ export class AuthService {
       }),
     ]);
     await this.email.sendVerification(user.email, code);
-    return { message: 'Hemos enviado un nuevo código de verificación.' };
+    return { message: genericMessage };
   }
 
   async verifyEmail(dto: VerifyEmailDto) {
@@ -161,25 +182,36 @@ export class AuthService {
       throw new UnauthorizedException('Código no válido o expirado');
     }
     if (this.tokens.hash(dto.code) !== token.tokenHash) {
-      await this.prisma.verificationToken.update({
-        where: { id: token.id },
+      const updated = await this.prisma.verificationToken.updateMany({
+        where: {
+          id: token.id,
+          invalidatedAt: null,
+          attempts: token.attempts,
+        },
         data: {
           attempts: { increment: 1 },
           invalidatedAt: token.attempts + 1 >= 5 ? new Date() : undefined,
         },
       });
+      if (updated.count === 0) {
+        throw new UnauthorizedException('Código no válido o expirado');
+      }
       throw new UnauthorizedException('Código no válido o expirado');
     }
-    await this.prisma.$transaction([
-      this.prisma.user.update({
-        where: { id: user.id },
-        data: { status: UserStatus.ACTIVE, verifiedAt: new Date() },
-      }),
-      this.prisma.verificationToken.update({
-        where: { id: token.id },
-        data: { invalidatedAt: new Date() },
-      }),
-      this.prisma.auditEvent.create({
+    const verifiedAt = new Date();
+    await this.prisma.$transaction(async (transaction) => {
+      const consumed = await transaction.verificationToken.updateMany({
+        where: { id: token.id, invalidatedAt: null, attempts: token.attempts },
+        data: { invalidatedAt: verifiedAt },
+      });
+      const activated = await transaction.user.updateMany({
+        where: { id: user.id, status: UserStatus.PENDING_VERIFICATION },
+        data: { status: UserStatus.ACTIVE, verifiedAt },
+      });
+      if (consumed.count !== 1 || activated.count !== 1) {
+        throw new UnauthorizedException('Código no válido o expirado');
+      }
+      await transaction.auditEvent.create({
         data: {
           actorId: user.id,
           action: 'account.email_verified',
@@ -187,24 +219,23 @@ export class AuthService {
           resourceId: user.id,
           result: 'SUCCESS',
         },
-      }),
-    ]);
+      });
+    });
     return { message: 'Cuenta verificada correctamente.' };
   }
 
   async login(dto: LoginDto, request: Request, response: Response) {
+    const emailNormalized = this.normalizeEmail(dto.email);
+    await this.throttle.beforeAttempt(emailNormalized, request);
     const user = await this.prisma.user.findUnique({
-      where: { emailNormalized: this.normalizeEmail(dto.email) },
+      where: { emailNormalized },
     });
     if (!user?.passwordHash || !(await this.passwords.verify(user.passwordHash, dto.password))) {
+      await this.throttle.recordFailure(emailNormalized, request);
       throw new UnauthorizedException('Correo o contraseña no válidos');
     }
-    if (user.status === UserStatus.PENDING_VERIFICATION) {
-      throw new ConflictException(
-        'Debes verificar tu correo electrónico antes de iniciar sesión',
-      );
-    }
     if (user.status !== UserStatus.ACTIVE) {
+      await this.throttle.recordFailure(emailNormalized, request);
       throw new UnauthorizedException('Correo o contraseña no válidos');
     }
     const activeMfa = await this.prisma.mfaFactor.findFirst({
@@ -251,20 +282,13 @@ export class AuthService {
       where: { emailNormalized: this.normalizeEmail(dto.email) },
       select: { id: true, email: true, status: true },
     });
-    if (!user) {
-      throw new NotFoundException(
-        'No existe una cuenta asociada a este correo electrónico',
-      );
-    }
-    if (user.status === UserStatus.DEACTIVATED) {
-      throw new ConflictException(
-        'Esta cuenta está desactivada y no puede recuperar el acceso',
-      );
-    }
-    if (user.status === UserStatus.PENDING_VERIFICATION) {
-      throw new ConflictException(
-        'La cuenta aún no está verificada; verifica tu correo antes de recuperar el acceso',
-      );
+    const genericMessage = 'Si existe una cuenta elegible, recibirás instrucciones de recuperación por correo.';
+    if (
+      !user ||
+      user.status === UserStatus.DEACTIVATED ||
+      user.status === UserStatus.PENDING_VERIFICATION
+    ) {
+      return { message: genericMessage };
     }
     const rawToken = this.tokens.createToken();
     await this.prisma.passwordResetToken.updateMany({
@@ -284,15 +308,14 @@ export class AuthService {
       'http://localhost:3000';
     await this.email.sendPasswordReset(
       user.email,
-      `${baseUrl}/reset-password?userId=${user.id}&token=${encodeURIComponent(rawToken)}`,
+      `${baseUrl}/reset-password?token=${encodeURIComponent(rawToken)}`,
     );
-    return { message: 'Hemos enviado las instrucciones de recuperación a tu correo.' };
+    return { message: genericMessage };
   }
 
   async resetPassword(dto: ResetPasswordDto) {
     const token = await this.prisma.passwordResetToken.findFirst({
       where: {
-        userId: dto.userId,
         tokenHash: this.tokens.hash(dto.token),
         usedAt: null,
       },
@@ -300,9 +323,11 @@ export class AuthService {
     if (!token || token.expiresAt <= new Date()) {
       throw new UnauthorizedException('Enlace no válido o expirado');
     }
+    const userId = token.userId;
+    this.passwords.assertNotCommon(dto.password);
     const passwordHash = await this.passwords.hash(dto.password);
     const history = await this.prisma.passwordHistory.findMany({
-      where: { userId: dto.userId },
+      where: { userId },
       orderBy: { createdAt: 'desc' },
       take: 5,
     });
@@ -311,33 +336,225 @@ export class AuthService {
         throw new ConflictException('No puedes reutilizar una contraseña reciente');
       }
     }
-    await this.prisma.$transaction([
-      this.prisma.user.update({
-        where: { id: dto.userId },
-        data: { passwordHash, status: UserStatus.ACTIVE },
-      }),
-      this.prisma.passwordHistory.create({
-        data: { userId: dto.userId, passwordHash },
-      }),
-      this.prisma.passwordResetToken.update({
-        where: { id: token.id },
+    await this.prisma.$transaction(async (transaction) => {
+      const consumed = await transaction.passwordResetToken.updateMany({
+        where: { id: token.id, usedAt: null, expiresAt: { gt: new Date() } },
         data: { usedAt: new Date() },
-      }),
-      this.prisma.session.updateMany({
-        where: { userId: dto.userId, status: 'ACTIVE' },
+      });
+      if (consumed.count !== 1) {
+        throw new UnauthorizedException('Enlace no válido o expirado');
+      }
+      await transaction.user.update({
+        where: { id: userId },
+        data: { passwordHash, status: UserStatus.ACTIVE },
+      });
+      await transaction.passwordHistory.create({
+        data: { userId, passwordHash },
+      });
+      const recentHistory = await transaction.passwordHistory.findMany({
+        where: { userId },
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+        select: { id: true },
+      });
+      await transaction.passwordHistory.deleteMany({
+        where: { userId, id: { notIn: recentHistory.map(({ id }) => id) } },
+      });
+      await transaction.session.updateMany({
+        where: { userId, status: 'ACTIVE' },
         data: { status: 'REVOKED', revokedAt: new Date() },
-      }),
-      this.prisma.auditEvent.create({
+      });
+      await transaction.auditEvent.create({
         data: {
-          actorId: dto.userId,
+          actorId: userId,
           action: 'account.password_reset',
           resourceType: 'user',
-          resourceId: dto.userId,
+          resourceId: userId,
           result: 'SUCCESS',
         },
-      }),
-    ]);
+      });
+    });
     return { message: 'Contraseña actualizada correctamente.' };
+  }
+
+  async changePassword(dto: ChangePasswordDto, request: Request) {
+    const userId = await this.sessions.requireUser(request);
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { passwordHash: true },
+    });
+    if (!user?.passwordHash || !(await this.passwords.verify(user.passwordHash, dto.currentPassword))) {
+      throw new UnauthorizedException('Credenciales no válidas');
+    }
+    this.passwords.assertNotCommon(dto.newPassword);
+    const history = await this.prisma.passwordHistory.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+      take: 5,
+    });
+    for (const previous of history) {
+      if (await this.passwords.verify(previous.passwordHash, dto.newPassword)) {
+        throw new ConflictException('No puedes reutilizar una contraseña reciente');
+      }
+    }
+    const passwordHash = await this.passwords.hash(dto.newPassword);
+    const currentToken = request.cookies?.[process.env.SESSION_COOKIE_NAME ?? 'coordia_session'] as string | undefined;
+    await this.prisma.$transaction(async (transaction) => {
+      await transaction.user.update({
+        where: { id: userId },
+        data: { passwordHash },
+      });
+      await transaction.passwordHistory.create({
+        data: { userId, passwordHash },
+      });
+      const recentHistory = await transaction.passwordHistory.findMany({
+        where: { userId },
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+        select: { id: true },
+      });
+      await transaction.passwordHistory.deleteMany({
+        where: { userId, id: { notIn: recentHistory.map(({ id }) => id) } },
+      });
+      await transaction.session.updateMany({
+        where: {
+          userId,
+          status: 'ACTIVE',
+          ...(currentToken ? { NOT: { tokenHash: this.tokens.hash(currentToken) } } : {}),
+        },
+        data: { status: 'REVOKED', revokedAt: new Date() },
+      });
+      await transaction.auditEvent.create({
+        data: {
+          actorId: userId,
+          action: 'account.password_changed',
+          resourceType: 'user',
+          resourceId: userId,
+          result: 'SUCCESS',
+        },
+      });
+    });
+    return { message: 'Contraseña actualizada correctamente.' };
+  }
+
+  async requestEmailChange(dto: RequestEmailChangeDto, request: Request) {
+    const userId = await this.sessions.requireUser(request);
+    const targetEmail = dto.newEmail.trim();
+    const targetNormalized = this.normalizeEmail(targetEmail);
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { email: true, emailNormalized: true, passwordHash: true },
+    });
+    if (
+      !user?.passwordHash ||
+      !(await this.passwords.verify(user.passwordHash, dto.currentPassword))
+    ) {
+      throw new UnauthorizedException('Credenciales no válidas');
+    }
+    if (user.emailNormalized === targetNormalized) {
+      throw new ConflictException('El nuevo correo debe ser diferente al actual');
+    }
+    const existing = await this.prisma.user.findUnique({
+      where: { emailNormalized: targetNormalized },
+      select: { id: true },
+    });
+    if (existing) {
+      throw new ConflictException('No se puede utilizar ese correo electrónico');
+    }
+    const rawToken = this.tokens.createToken();
+    try {
+      await this.prisma.$transaction([
+        this.prisma.emailChangeToken.updateMany({
+          where: { userId, usedAt: null },
+          data: { usedAt: new Date() },
+        }),
+        this.prisma.emailChangeToken.create({
+          data: {
+            userId,
+            targetEmail,
+            targetNormalized,
+            tokenHash: this.tokens.hash(rawToken),
+            expiresAt: new Date(Date.now() + 30 * 60 * 1000),
+          },
+        }),
+        this.prisma.auditEvent.create({
+          data: {
+            actorId: userId,
+            action: 'account.email_change_requested',
+            resourceType: 'user',
+            resourceId: userId,
+            result: 'SUCCESS',
+          },
+        }),
+      ]);
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        throw new ConflictException('No se puede utilizar ese correo electrónico');
+      }
+      throw error;
+    }
+    const baseUrl =
+      process.env.WEB_PUBLIC_ORIGIN ??
+      process.env.WEB_ORIGIN ??
+      'http://localhost:3000';
+    await this.email.sendEmailChangeVerification(
+      targetEmail,
+      `${baseUrl}/change-email?token=${encodeURIComponent(rawToken)}`,
+    );
+    return { message: 'Hemos enviado un enlace de confirmación al nuevo correo.' };
+  }
+
+  async confirmEmailChange(dto: ConfirmEmailChangeDto, request: Request) {
+    const userId = await this.sessions.requireUser(request);
+    const tokenHash = this.tokens.hash(dto.token);
+    const token = await this.prisma.emailChangeToken.findFirst({
+      where: { userId, tokenHash, usedAt: null },
+    });
+    if (!token || token.expiresAt <= new Date()) {
+      throw new UnauthorizedException('Enlace no válido o expirado');
+    }
+    const currentToken = request.cookies?.[
+      process.env.SESSION_COOKIE_NAME ?? 'coordia_session'
+    ] as string | undefined;
+    await this.prisma.$transaction(async (transaction) => {
+      const consumed = await transaction.emailChangeToken.updateMany({
+        where: {
+          id: token.id,
+          userId,
+          usedAt: null,
+          expiresAt: { gt: new Date() },
+        },
+        data: { usedAt: new Date() },
+      });
+      if (consumed.count !== 1) {
+        throw new UnauthorizedException('Enlace no válido o expirado');
+      }
+      const updated = await transaction.user.updateMany({
+        where: { id: userId, emailNormalized: { not: token.targetNormalized } },
+        data: { email: token.targetEmail, emailNormalized: token.targetNormalized },
+      });
+      if (updated.count !== 1) {
+        throw new ConflictException('No se puede utilizar ese correo electrónico');
+      }
+      await transaction.session.updateMany({
+        where: {
+          userId,
+          status: 'ACTIVE',
+          ...(currentToken ? { NOT: { tokenHash: this.tokens.hash(currentToken) } } : {}),
+        },
+        data: { status: 'REVOKED', revokedAt: new Date() },
+      });
+      await transaction.auditEvent.create({
+        data: {
+          actorId: userId,
+          action: 'account.email_changed',
+          resourceType: 'user',
+          resourceId: userId,
+          result: 'SUCCESS',
+        },
+      });
+    });
+    return { message: 'Correo electrónico actualizado correctamente.' };
   }
 
   private normalizeEmail(email: string): string {
