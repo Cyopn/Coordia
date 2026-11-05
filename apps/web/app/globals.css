@@ -220,11 +220,79 @@ legend {
 }
 
 .gantt-bar {
+  position: absolute;
+  top: 0.2rem;
+  bottom: 0.2rem;
   background: var(--accent);
   border-radius: 0.5rem;
-  display: block;
-  height: 0.75rem;
+  min-width: 0.25rem;
   opacity: 0.75;
+}
+
+.gantt-track {
+  position: relative;
+  height: 1.1rem;
+  margin: 0.4rem 0;
+  border-radius: 999px;
+  background: #e2e8ea;
+}
+
+.gantt-bar.blocked {
+  background: #b42318;
+}
+
+.gantt-label {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.calendar-header,
+.calendar-grid {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.calendar-header {
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  margin-bottom: 0.75rem;
+}
+
+.calendar-grid {
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+}
+
+.calendar-grid > strong {
+  padding: 0.35rem;
+  text-align: center;
+}
+
+.calendar-day {
+  min-height: 7rem;
+  padding: 0.4rem;
+  border: 1px solid #cbd4d8;
+  border-radius: 0.5rem;
+}
+
+.calendar-task {
+  display: block;
+  width: 100%;
+  margin-top: 0.35rem;
+  overflow: hidden;
+  border: 0;
+  border-radius: 0.25rem;
+  padding: 0.25rem;
+  background: var(--accent);
+  color: white;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
 }
 
 .task-card {

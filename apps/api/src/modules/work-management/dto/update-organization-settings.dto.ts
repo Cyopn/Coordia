@@ -1,13 +1,15 @@
-import { IsObject, IsOptional } from 'class-validator';
+import { IsArray, IsInt, IsObject, IsOptional, IsString, Max, Min } from 'class-validator';
 
 export class UpdateOrganizationSettingsDto {
   @IsOptional()
-  @IsObject()
-  taskStatuses?: unknown;
+  @IsArray()
+  @IsString({ each: true })
+  taskStatuses?: string[];
 
   @IsOptional()
-  @IsObject()
-  taskPriorities?: unknown;
+  @IsArray()
+  @IsString({ each: true })
+  taskPriorities?: string[];
 
   @IsOptional()
   @IsObject()
@@ -18,8 +20,11 @@ export class UpdateOrganizationSettingsDto {
   workingHours?: unknown;
 
   @IsOptional()
-  @IsObject()
-  workingDays?: unknown;
+  @IsArray()
+  @IsInt({ each: true })
+  @Min(1, { each: true })
+  @Max(7, { each: true })
+  workingDays?: number[];
 
   @IsOptional()
   @IsObject()

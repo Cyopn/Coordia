@@ -9,6 +9,7 @@ import { CreateCapacityAdjustmentDto } from './dto/create-capacity-adjustment.dt
 import { CreateAbsenceDto } from './dto/create-absence.dto';
 import { CreateTemplateDto } from './dto/create-template.dto';
 import { UpdateOrganizationSettingsDto } from './dto/update-organization-settings.dto';
+import { UpdateTemplateDto } from './dto/update-template.dto';
 
 @Injectable()
 export class WorkManagementService {
@@ -38,6 +39,7 @@ export class WorkManagementService {
 
   async updateSettings(organizationId: string, dto: UpdateOrganizationSettingsDto, request: Request) {
     const userId = await this.authorized(organizationId, request, PERMISSIONS.ORGANIZATION_SETTINGS);
+    this.validateSettings(dto);
     const settings = await this.prisma.organizationSettings.upsert({
       where: { organizationId },
       create: { organizationId, ...dto } as Prisma.OrganizationSettingsUncheckedCreateInput,
@@ -63,7 +65,7 @@ export class WorkManagementService {
       where: { userId_organizationId: { userId, organizationId } },
       select: { id: true },
     });
-    const items = dto.items ?? [];
+    const items = this.validateTemplateItems(dto.items ?? []);
     const template = await this.prisma.$transaction(async (transaction) => {
       const created = await transaction.projectTemplate.create({
         data: {
@@ -91,6 +93,18 @@ export class WorkManagementService {
         });
         itemIds.push(createdItem.id);
       }
+      for (const [index, item] of items.entries()) {
+        const dependencyIds = (item.dependsOnIndexes ?? []).map((dependencyIndex) => itemIds[dependencyIndex]);
+        if (dependencyIds.some((id) => !id) || dependencyIds.includes(itemIds[index])) {
+          throw new ForbiddenException('La plantilla contiene una dependencia inválida');
+        }
+        if (dependencyIds.length) {
+          await transaction.projectWorkItem.update({
+            where: { id: itemIds[index] },
+            data: { dependsOnIds: dependencyIds as Prisma.InputJsonValue },
+          });
+        }
+      }
       return created;
     });
     await this.audit(organizationId, userId, 'project_template.created', template.id);
@@ -98,6 +112,87 @@ export class WorkManagementService {
       where: { id: template.id },
       include: { workItems: { orderBy: { sortOrder: 'asc' } } },
     });
+  }
+
+  async updateTemplate(
+    organizationId: string,
+    templateId: string,
+    dto: UpdateTemplateDto,
+    request: Request,
+  ) {
+    const userId = await this.authorized(organizationId, request, PERMISSIONS.TEMPLATE_MANAGE);
+    const items = dto.items === undefined ? undefined : this.validateTemplateItems(dto.items);
+    const updated = await this.prisma.$transaction(async (transaction) => {
+      const template = await transaction.projectTemplate.findFirst({
+        where: { id: templateId, organizationId, status: 'ACTIVE' },
+        select: { id: true },
+      });
+      if (!template) throw new NotFoundException('Plantilla no encontrada');
+      const result = await transaction.projectTemplate.update({
+        where: { id: templateId },
+        data: {
+          name: dto.name.trim(),
+          description: dto.description?.trim(),
+          configuration: dto.configuration as Prisma.InputJsonValue | undefined,
+        },
+      });
+      if (items) {
+        await transaction.projectWorkItem.deleteMany({ where: { templateId } });
+        const ids: string[] = [];
+        for (const [index, item] of items.entries()) {
+          const created = await transaction.projectWorkItem.create({
+            data: {
+              templateId,
+              parentId: item.parentIndex === undefined ? undefined : ids[item.parentIndex],
+              title: item.title.trim(),
+              type: item.type,
+              status: item.status,
+              priority: item.priority,
+              estimatedHours: item.estimatedHours,
+              sortOrder: index,
+            },
+          });
+          ids.push(created.id);
+        }
+        for (const [index, item] of items.entries()) {
+          const dependencyIds = (item.dependsOnIndexes ?? []).map((dependencyIndex) => ids[dependencyIndex]);
+          if (dependencyIds.some((id) => !id) || dependencyIds.includes(ids[index])) {
+            throw new ForbiddenException('La plantilla contiene una dependencia inválida');
+          }
+          if (dependencyIds.length) {
+            await transaction.projectWorkItem.update({
+              where: { id: ids[index] },
+              data: { dependsOnIds: dependencyIds as Prisma.InputJsonValue },
+            });
+          }
+        }
+      }
+      return result;
+    });
+    await this.audit(organizationId, userId, 'project_template.updated', updated.id);
+    return updated;
+  }
+
+  async archiveTemplate(organizationId: string, templateId: string, request: Request) {
+    const userId = await this.authorized(organizationId, request, PERMISSIONS.TEMPLATE_MANAGE);
+    const template = await this.prisma.projectTemplate.updateMany({
+      where: { id: templateId, organizationId, status: 'ACTIVE' },
+      data: { status: 'ARCHIVED' },
+    });
+    if (!template.count) throw new NotFoundException('Plantilla no encontrada');
+    await this.audit(organizationId, userId, 'project_template.archived', templateId);
+  }
+
+  async deleteTemplate(organizationId: string, templateId: string, request: Request) {
+    const userId = await this.authorized(organizationId, request, PERMISSIONS.TEMPLATE_MANAGE);
+    const template = await this.prisma.projectTemplate.findFirst({
+      where: { id: templateId, organizationId },
+      select: { id: true, _count: { select: { projects: true } } },
+    });
+    if (!template) throw new NotFoundException('Plantilla no encontrada');
+    if (template._count.projects) throw new ForbiddenException('No se puede eliminar una plantilla usada por proyectos');
+    await this.prisma.projectTemplate.delete({ where: { id: templateId } });
+    await this.audit(organizationId, userId, 'project_template.deleted', templateId);
   }
 
   async createProjectFromTemplate(
@@ -150,7 +245,7 @@ export class WorkManagementService {
       });
       const ids = new Map<string, string>();
       const taskIds = new Map<string, string>();
-      for (const item of template.workItems) {
+      for (const item of this.orderTemplateItems(template.workItems)) {
         const copy = await transaction.projectWorkItem.create({
           data: {
             projectId: created.id,
@@ -181,6 +276,25 @@ export class WorkManagementService {
           },
         });
         taskIds.set(item.id, task.id);
+      }
+      for (const item of template.workItems) {
+        const dependsOnIds = Array.isArray(item.dependsOnIds) ? item.dependsOnIds : [];
+        if (dependsOnIds.length) {
+          const dependencyTaskIds = dependsOnIds.map((sourceId) => taskIds.get(String(sourceId)));
+          if (dependencyTaskIds.some((dependencyId) => !dependencyId)) {
+            throw new ForbiddenException('La plantilla contiene una dependencia inexistente');
+          }
+          await transaction.projectWorkItem.update({
+            where: { id: ids.get(item.id)! },
+            data: { dependsOnIds: dependsOnIds.map((sourceId) => ids.get(String(sourceId))!) as Prisma.InputJsonValue },
+          });
+          await transaction.taskDependency.createMany({
+            data: dependencyTaskIds.map((dependsOnId) => ({
+              taskId: taskIds.get(item.id)!,
+              dependsOnId: dependsOnId!,
+            })),
+          });
+        }
       }
       return created;
     });
@@ -261,7 +375,7 @@ export class WorkManagementService {
       this.prisma.organizationSettings.findUnique({ where: { organizationId } }),
       this.prisma.task.findMany({
         where: { project: { organizationId }, assigneeId: { not: null }, startsAt: { lt: end }, dueAt: { gte: start } },
-        select: { assigneeId: true, estimatedHours: true, status: true },
+        select: { assigneeId: true, estimatedHours: true, startsAt: true, dueAt: true },
       }),
       this.prisma.workCapacityAdjustment.findMany({ where: { organizationId, date: { gte: start, lte: end } } }),
       this.prisma.workAbsence.findMany({ where: { organizationId, startsAt: { lte: end }, endsAt: { gte: start } } }),
@@ -270,17 +384,14 @@ export class WorkManagementService {
     const dailyHours = this.workingHours(settings?.workingHours);
     return memberships.map((membership) => {
       const assigned = tasks.filter((task) => task.assigneeId === membership.id)
-        .reduce((sum, task) => sum + Number(task.estimatedHours ?? 0), 0);
+        .reduce((sum, task) => sum + this.distributedTaskHours(task, start, end, workingDays), 0);
+      const memberAbsences = absences.filter((item) => item.membershipId === membership.id);
+      const absenceHours = memberAbsences.reduce((sum, item) => sum + this.overlapWorkingHours(
+        item.startsAt, item.endsAt, start, end, workingDays, dailyHours,
+      ), 0);
       const adjusted = adjustments.filter((item) => item.membershipId === membership.id)
         .reduce((sum, item) => sum + (item.type === 'INCREASE' ? Number(item.hours) : -Number(item.hours)), 0);
-      const absentDays = absences
-        .filter((item) => item.membershipId === membership.id)
-        .reduce((days, item) => days + this.workingDaysBetween(
-          new Date(Math.max(item.startsAt.getTime(), start.getTime())),
-          new Date(Math.min(item.endsAt.getTime(), end.getTime())),
-          workingDays,
-        ), 0);
-      const capacity = Math.max(0, this.workingDaysBetween(start, end, workingDays) - absentDays) * dailyHours + adjusted;
+      const capacity = Math.max(0, this.workingDaysBetween(start, end, workingDays) * dailyHours - absenceHours + adjusted);
       return { membershipId: membership.id, user: membership.user, assignedHours: assigned, capacityHours: capacity, overCapacity: assigned > capacity };
     });
   }
@@ -291,7 +402,7 @@ export class WorkManagementService {
     if (!record.start || !record.end) return 40;
     const [startHour = 0, startMinute = 0] = record.start.split(':').map(Number);
     const [endHour = 0, endMinute = 0] = record.end.split(':').map(Number);
-    return Math.max(0, ((endHour * 60 + endMinute) - (startHour * 60 + startMinute)) / 60) * 5;
+    return Math.max(0, ((endHour * 60 + endMinute) - (startHour * 60 + startMinute)) / 60);
   }
 
   private workingDays(value: unknown): number[] {
@@ -309,6 +420,97 @@ export class WorkManagementService {
     while (cursor <= last) {
       if (days.includes(cursor.getDay() || 7)) total += 1;
       cursor.setDate(cursor.getDate() + 1);
+    }
+
+    private distributedTaskHours(
+      task: { estimatedHours: unknown; startsAt?: Date | null; dueAt?: Date | null },
+      periodStart: Date,
+      periodEnd: Date,
+      workingDays: number[],
+    ): number {
+      const taskStart = task.startsAt ?? task.dueAt ?? periodStart;
+      const taskEnd = task.dueAt ?? task.startsAt ?? periodEnd;
+      if (taskEnd < periodStart || taskStart > periodEnd) return 0;
+      const totalDays = this.workingDaysBetween(taskStart, taskEnd, workingDays);
+      if (!totalDays) return 0;
+      const overlapDays = this.workingDaysBetween(
+        new Date(Math.max(taskStart.getTime(), periodStart.getTime())),
+        new Date(Math.min(taskEnd.getTime(), periodEnd.getTime())),
+        workingDays,
+      );
+      return Number(task.estimatedHours ?? 0) * overlapDays / totalDays;
+    }
+
+    private overlapWorkingHours(
+      absenceStart: Date,
+      absenceEnd: Date,
+      periodStart: Date,
+      periodEnd: Date,
+      workingDays: number[],
+      dailyHours: number,
+    ): number {
+      if (absenceEnd < periodStart || absenceStart > periodEnd) return 0;
+      return this.workingDaysBetween(
+        new Date(Math.max(absenceStart.getTime(), periodStart.getTime())),
+        new Date(Math.min(absenceEnd.getTime(), periodEnd.getTime())),
+        workingDays,
+      ) * dailyHours;
+    }
+
+    private validateTemplateItems(items: CreateTemplateDto['items']) {
+      const normalized = items ?? [];
+      normalized.forEach((item, index) => {
+        if (item.parentIndex !== undefined && (item.parentIndex < 0 || item.parentIndex >= index)) {
+          throw new ForbiddenException('La plantilla contiene una referencia de padre inválida');
+        }
+        if (item.dependsOnIndexes && new Set(item.dependsOnIndexes).size !== item.dependsOnIndexes.length) {
+          throw new ForbiddenException('Una plantilla no puede repetir dependencias');
+        }
+        if (item.dependsOnIndexes?.some((dependencyIndex) => dependencyIndex < 0 || dependencyIndex >= normalized.length || dependencyIndex === index)) {
+          throw new ForbiddenException('La plantilla contiene una dependencia inválida');
+        }
+      });
+      const visiting = new Set<number>();
+      const visited = new Set<number>();
+      const visit = (index: number): void => {
+        if (visiting.has(index)) throw new ForbiddenException('La plantilla contiene dependencias circulares');
+        if (visited.has(index)) return;
+        visiting.add(index);
+        for (const dependencyIndex of normalized[index]?.dependsOnIndexes ?? []) visit(dependencyIndex);
+        visiting.delete(index);
+        visited.add(index);
+      };
+      normalized.forEach((_, index) => visit(index));
+      return normalized;
+    }
+
+    private orderTemplateItems<T extends { id: string; parentId: string | null }>(items: T[]): T[] {
+      const remaining = [...items].sort((a, b) => a.id.localeCompare(b.id));
+      const ordered: T[] = [];
+      const placed = new Set<string>();
+      while (remaining.length) {
+        const index = remaining.findIndex((item) => !item.parentId || placed.has(item.parentId));
+        if (index < 0) throw new ForbiddenException('La plantilla contiene una jerarquía circular o inválida');
+        const [item] = remaining.splice(index, 1);
+        ordered.push(item);
+        placed.add(item.id);
+      }
+      return ordered;
+    }
+
+    private validateSettings(dto: UpdateOrganizationSettingsDto) {
+      if (dto.workingDays && new Set(dto.workingDays).size !== dto.workingDays.length) {
+        throw new ForbiddenException('Los días laborables no pueden repetirse');
+      }
+      if (dto.workingHours) {
+        const value = dto.workingHours as { start?: unknown; end?: unknown };
+        if (typeof value.start !== 'string' || typeof value.end !== 'string' ||
+          !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value.start) ||
+          !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value.end) ||
+          value.start >= value.end) {
+          throw new ForbiddenException('El horario laboral no es válido');
+        }
+      }
     }
     return total;
   }

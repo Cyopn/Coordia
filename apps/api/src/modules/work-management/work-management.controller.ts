@@ -1,9 +1,10 @@
-import { Body, Controller, Get, Inject, Param, Patch, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Inject, Param, Patch, Post, Query, Req } from '@nestjs/common';
 import { Request } from 'express';
 import { CreateCapacityAdjustmentDto } from './dto/create-capacity-adjustment.dto';
 import { CreateAbsenceDto } from './dto/create-absence.dto';
 import { CreateTemplateDto } from './dto/create-template.dto';
 import { UpdateOrganizationSettingsDto } from './dto/update-organization-settings.dto';
+import { UpdateTemplateDto } from './dto/update-template.dto';
 import { WorkManagementService } from './work-management.service';
 
 @Controller('organizations/:organizationId')
@@ -28,6 +29,34 @@ export class WorkManagementController {
   @Post('project-templates')
   createTemplate(@Param('organizationId') organizationId: string, @Body() dto: CreateTemplateDto, @Req() request: Request) {
     return this.work.createTemplate(organizationId, dto, request);
+  }
+
+  @Patch('project-templates/:templateId')
+  updateTemplate(
+    @Param('organizationId') organizationId: string,
+    @Param('templateId') templateId: string,
+    @Body() dto: UpdateTemplateDto,
+    @Req() request: Request,
+  ) {
+    return this.work.updateTemplate(organizationId, templateId, dto, request);
+  }
+
+  @Post('project-templates/:templateId/archive')
+  archiveTemplate(
+    @Param('organizationId') organizationId: string,
+    @Param('templateId') templateId: string,
+    @Req() request: Request,
+  ) {
+    return this.work.archiveTemplate(organizationId, templateId, request);
+  }
+
+  @Delete('project-templates/:templateId')
+  deleteTemplate(
+    @Param('organizationId') organizationId: string,
+    @Param('templateId') templateId: string,
+    @Req() request: Request,
+  ) {
+    return this.work.deleteTemplate(organizationId, templateId, request);
   }
 
   @Post('project-templates/:templateId/projects')

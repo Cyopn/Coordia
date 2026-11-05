@@ -13,6 +13,7 @@ type Task = {
   description: string | null;
   status: string;
   priority: string;
+  startsAt: string | null;
   dueAt: string | null;
   parentTask: { id: string; title: string } | null;
   labels: { label: Label }[];
@@ -54,6 +55,7 @@ export function Workspace() {
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(true);
   const [viewMode, setViewMode] = useState<'list' | 'kanban' | 'calendar' | 'gantt'>('list');
+  const [calendarDate, setCalendarDate] = useState(() => new Date());
 
   useEffect(() => {
     void loadOrganizations();
@@ -336,27 +338,14 @@ export function Workspace() {
             ))}
           </div>
         ) : viewMode === 'calendar' ? (
-          <div className="task-list">
-            {tasks?.items.filter((task) => task.dueAt || task.parentTask).map((task) => (
-              <article className="task-card" key={task.id}>
-                <h3>{task.title}</h3>
-                <p>{task.dueAt ? `Vence ${new Date(task.dueAt).toLocaleDateString('es-MX')}` : 'Sin fecha límite'}</p>
-                <button type="button" className="secondary-button" onClick={() => beginEdit(task)}>Editar</button>
-              </article>
-            ))}
-          </div>
+          <CalendarView
+            tasks={tasks?.items ?? []}
+            date={calendarDate}
+            onChange={setCalendarDate}
+            onEdit={beginEdit}
+          />
         ) : viewMode === 'gantt' ? (
-          <div className="task-list">
-            {tasks?.items.map((task) => (
-              <article className="task-card" key={task.id}>
-                <div className="gantt-row">
-                  <strong>{task.title}</strong>
-                  <span className="gantt-bar" style={{ width: `${Math.max(10, Math.min(100, (task.priority === 'URGENT' ? 100 : task.priority === 'HIGH' ? 75 : task.priority === 'MEDIUM' ? 50 : 25)))}%` }} />
-                </div>
-                <p>{task.dependencies.length ? `Precedida por ${task.dependencies.length} tarea(s)` : 'Sin dependencias'}</p>
-              </article>
-            ))}
-          </div>
+          <GanttView tasks={tasks?.items ?? []} onEdit={beginEdit} />
         ) : (
         <div className="task-list">
           {tasks?.items.map((task) => (
@@ -383,6 +372,84 @@ export function Workspace() {
       </section>
     </main>
   );
+}
+
+function CalendarView({
+  tasks,
+  date,
+  onChange,
+  onEdit,
+}: {
+  tasks: Task[];
+  date: Date;
+  onChange: (date: Date) => void;
+  onEdit: (task: Task) => void;
+}) {
+  const year = date.getFullYear();
+  const month = date.getMonth();
+  const firstDay = new Date(year, month, 1);
+  const days = new Date(year, month + 1, 0).getDate();
+  const offset = (firstDay.getDay() + 6) % 7;
+  const cells = Array.from({ length: offset + days }, (_, index) => index < offset ? null : index - offset + 1);
+  return (
+    <div className="calendar-view">
+      <div className="calendar-header">
+        <button type="button" className="secondary-button" onClick={() => onChange(new Date(year, month - 1, 1))}>Anterior</button>
+        <strong>{date.toLocaleDateString('es-MX', { month: 'long', year: 'numeric' })}</strong>
+        <button type="button" className="secondary-button" onClick={() => onChange(new Date(year, month + 1, 1))}>Siguiente</button>
+      </div>
+      <div className="calendar-grid">
+        {['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'].map((day) => <strong key={day}>{day}</strong>)}
+        {cells.map((day, index) => (
+          <div className="calendar-day" key={`${day ?? 'empty'}-${index}`}>
+            {day && <time dateTime={`${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`}>{day}</time>}
+            {day && tasks.filter((task) => isTaskOnDay(task, new Date(year, month, day))).map((task) => (
+              <button type="button" className="calendar-task" key={task.id} onClick={() => onEdit(task)}>
+                {task.title}
+              </button>
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function GanttView({ tasks, onEdit }: { tasks: Task[]; onEdit: (task: Task) => void }) {
+  const dated = tasks.filter((task) => task.startsAt || task.dueAt);
+  if (!dated.length) return <p>Asigna fechas de inicio y vencimiento para visualizar el Gantt.</p>;
+  const start = new Date(Math.min(...dated.map((task) => new Date(task.startsAt ?? task.dueAt!).getTime())));
+  const end = new Date(Math.max(...dated.map((task) => new Date(task.dueAt ?? task.startsAt!).getTime())));
+  const range = Math.max(86400000, end.getTime() - start.getTime());
+  return (
+    <div className="task-list gantt-view">
+      {tasks.map((task) => {
+        const taskStart = task.startsAt ?? task.dueAt;
+        const taskEnd = task.dueAt ?? task.startsAt;
+        if (!taskStart || !taskEnd) return null;
+        const left = ((new Date(taskStart).getTime() - start.getTime()) / range) * 100;
+        const width = Math.max(2, ((new Date(taskEnd).getTime() - new Date(taskStart).getTime()) / range) * 100);
+        return (
+          <article className="task-card" key={task.id}>
+            <button type="button" className="gantt-label" onClick={() => onEdit(task)}>{task.title}</button>
+            <div className="gantt-track">
+              <span className={`gantt-bar ${task.status === 'BLOCKED' ? 'blocked' : ''}`} style={{ left: `${left}%`, width: `${width}%` }} />
+            </div>
+            <small>{new Date(taskStart).toLocaleDateString('es-MX')} - {new Date(taskEnd).toLocaleDateString('es-MX')}{task.dependencies.length ? ` · ${task.dependencies.length} predecesora(s)` : ''}</small>
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
+function isTaskOnDay(task: Task, day: Date): boolean {
+  const start = task.startsAt ? new Date(task.startsAt) : task.dueAt ? new Date(task.dueAt) : null;
+  const end = task.dueAt ? new Date(task.dueAt) : start;
+  if (!start || !end) return false;
+  const current = new Date(day.getFullYear(), day.getMonth(), day.getDate()).getTime();
+  return current >= new Date(start.getFullYear(), start.getMonth(), start.getDate()).getTime()
+    && current <= new Date(end.getFullYear(), end.getMonth(), end.getDate()).getTime();
 }
 
 function getError(error: unknown): string {

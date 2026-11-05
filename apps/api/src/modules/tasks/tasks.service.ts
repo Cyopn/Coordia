@@ -142,6 +142,12 @@ export class TasksService {
     }
     await this.validateRelations(organizationId, projectId, dto);
     await this.ensureNoDependencyCycle(projectId, dto.dependsOnIds ?? []);
+    await this.ensureAssignmentCapacity(organizationId, projectId, {
+      assigneeId: dto.assigneeId,
+      startsAt: dto.startsAt ? new Date(dto.startsAt) : null,
+      dueAt: dto.dueAt ? new Date(dto.dueAt) : null,
+      estimatedHours: dto.estimatedHours,
+    });
     const task = await this.prisma.$transaction(async (transaction) => {
       const created = await transaction.task.create({
         data: {
@@ -241,6 +247,8 @@ export class TasksService {
         dueAt: true,
         estimatedHours: true,
         dependencies: { select: { dependsOnId: true } },
+        collaborators: { select: { membershipId: true } },
+        dependencies: { select: { dependsOnId: true } },
       },
     });
     const durations = new Map(tasks.map((task) => [task.id, Math.max(1, Number(task.estimatedHours ?? 1))]));
@@ -311,6 +319,13 @@ export class TasksService {
     }
     await this.validateRelations(organizationId, projectId, dto);
     await this.ensureNoDependencyCycle(projectId, dto.dependsOnIds ?? [], taskId);
+    await this.ensureAssignmentCapacity(organizationId, projectId, {
+      taskId,
+      assigneeId: dto.assigneeId,
+      startsAt: dto.startsAt ? new Date(dto.startsAt) : null,
+      dueAt: dto.dueAt ? new Date(dto.dueAt) : null,
+      estimatedHours: dto.estimatedHours,
+    });
     const updated = await this.prisma.$transaction(async (transaction) => {
       const previous = await transaction.task.findUniqueOrThrow({
         where: { id: taskId },
@@ -367,6 +382,8 @@ export class TasksService {
         ['startsAt', previous.startsAt?.toISOString(), updated.startsAt?.toISOString()],
         ['dueAt', previous.dueAt?.toISOString(), updated.dueAt?.toISOString()],
         ['estimatedHours', previous.estimatedHours?.toString(), updated.estimatedHours?.toString()],
+        ['dependencies', JSON.stringify(previous.dependencies.map((item) => item.dependsOnId).sort()), dto.dependsOnIds ? JSON.stringify([...dto.dependsOnIds].sort()) : undefined],
+        ['collaborators', JSON.stringify(previous.collaborators.map((item) => item.membershipId).sort()), dto.collaboratorIds ? JSON.stringify([...dto.collaboratorIds].sort()) : undefined],
       ].filter(([, oldValue, newValue]) => oldValue !== newValue);
       if (changes.length) {
         const actorMembership = await transaction.membership.findUniqueOrThrow({
@@ -506,6 +523,103 @@ export class TasksService {
       select: { id: true },
     });
     return membership.id;
+  }
+
+  private async ensureAssignmentCapacity(
+    organizationId: string,
+    projectId: string,
+    input: {
+      taskId?: string;
+      assigneeId?: string;
+      startsAt: Date | null;
+      dueAt: Date | null;
+      estimatedHours?: number;
+    },
+  ): Promise<void> {
+    if (!input.assigneeId || !input.startsAt || !input.dueAt || input.dueAt < input.startsAt) return;
+    const project = await this.prisma.project.findFirst({
+      where: { id: projectId, organizationId },
+      select: { configuration: true },
+    });
+    const configuration = project?.configuration && typeof project.configuration === 'object'
+      ? project.configuration as { workingDays?: unknown; workingHours?: unknown }
+      : {};
+    const days = Array.isArray(configuration.workingDays)
+      ? configuration.workingDays.filter((day): day is number => typeof day === 'number')
+      : [1, 2, 3, 4, 5];
+    const hours = configuration.workingHours && typeof configuration.workingHours === 'object'
+      ? configuration.workingHours as { start?: string; end?: string }
+      : { start: '09:00', end: '17:00' };
+    const dailyHours = this.dailyHours(hours);
+    const totalDays = this.workingDaysBetween(input.startsAt, input.dueAt, days);
+    if (!totalDays || dailyHours <= 0) return;
+    const [existing, absences, adjustments] = await this.prisma.$transaction([
+      this.prisma.task.findMany({
+        where: {
+          project: { organizationId },
+          assigneeId: input.assigneeId,
+          id: input.taskId ? { not: input.taskId } : undefined,
+          startsAt: { lte: input.dueAt },
+          dueAt: { gte: input.startsAt },
+        },
+        select: { startsAt: true, dueAt: true, estimatedHours: true },
+      }),
+      this.prisma.workAbsence.findMany({
+        where: { organizationId, membershipId: input.assigneeId, startsAt: { lte: input.dueAt }, endsAt: { gte: input.startsAt } },
+        select: { startsAt: true, endsAt: true },
+      }),
+      this.prisma.workCapacityAdjustment.findMany({
+        where: { organizationId, membershipId: input.assigneeId, date: { gte: input.startsAt, lte: input.dueAt } },
+        select: { hours: true, type: true },
+      }),
+    ]);
+    const available = Math.max(
+      0,
+      totalDays * dailyHours
+        - absences.reduce((sum, absence) => sum + this.overlapWorkingDays(absence.startsAt, absence.endsAt, input.startsAt!, input.dueAt!, days) * dailyHours, 0)
+        + adjustments.reduce((sum, adjustment) => sum + (adjustment.type === 'INCREASE' ? Number(adjustment.hours) : -Number(adjustment.hours)), 0),
+    );
+    const assigned = existing.reduce((sum, task) => {
+      if (!task.startsAt || !task.dueAt) return sum;
+      const overlapDays = this.overlapWorkingDays(task.startsAt, task.dueAt, input.startsAt!, input.dueAt!, days);
+      const taskDays = this.workingDaysBetween(task.startsAt, task.dueAt, days);
+      return sum + (taskDays ? Number(task.estimatedHours ?? 0) * overlapDays / taskDays : 0);
+    }, 0);
+    const requested = Number(input.estimatedHours ?? 0);
+    if (assigned + requested > available) {
+      throw new ConflictException(
+        `La asignación excede la capacidad disponible (${(assigned + requested).toFixed(2)} h de ${available.toFixed(2)} h entre ${input.startsAt.toISOString().slice(0, 10)} y ${input.dueAt.toISOString().slice(0, 10)})`,
+      );
+    }
+  }
+
+  private dailyHours(value: { start?: string; end?: string }): number {
+    const start = value.start?.match(/^(\d{2}):(\d{2})$/);
+    const end = value.end?.match(/^(\d{2}):(\d{2})$/);
+    if (!start || !end) return 8;
+    return Math.max(0, ((Number(end[1]) * 60 + Number(end[2])) - (Number(start[1]) * 60 + Number(start[2]))) / 60);
+  }
+
+  private workingDaysBetween(start: Date, end: Date, days: number[]): number {
+    let total = 0;
+    const cursor = new Date(start);
+    cursor.setHours(0, 0, 0, 0);
+    const last = new Date(end);
+    last.setHours(0, 0, 0, 0);
+    while (cursor <= last) {
+      if (days.includes(cursor.getDay() || 7)) total += 1;
+      cursor.setDate(cursor.getDate() + 1);
+    }
+    return total;
+  }
+
+  private overlapWorkingDays(start: Date, end: Date, rangeStart: Date, rangeEnd: Date, days: number[]): number {
+    if (end < rangeStart || start > rangeEnd) return 0;
+    return this.workingDaysBetween(
+      new Date(Math.max(start.getTime(), rangeStart.getTime())),
+      new Date(Math.min(end.getTime(), rangeEnd.getTime())),
+      days,
+    );
   }
 
   private taskInclude() {

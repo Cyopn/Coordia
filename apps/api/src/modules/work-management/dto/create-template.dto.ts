@@ -23,6 +23,11 @@ export class CreateTemplateWorkItemDto {
 
   @IsOptional()
   parentIndex?: number;
+
+  @IsOptional()
+  @IsArray()
+  @IsNumber({}, { each: true })
+  dependsOnIndexes?: number[];
 }
 
 export class CreateTemplateDto {
