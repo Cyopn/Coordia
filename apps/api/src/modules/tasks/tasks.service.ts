@@ -173,11 +173,6 @@ export class TasksService {
               labelId,
             })),
           },
-          dependencies: {
-            create: (dto.dependsOnIds ?? []).map((dependsOnId) => ({
-              dependsOnId,
-            })),
-          },
           collaborators: {
             create: (dto.collaboratorIds ?? []).map((membershipId) => ({
               organizationId,
@@ -187,6 +182,15 @@ export class TasksService {
         },
         include: this.taskInclude(),
       });
+      if (dto.dependsOnIds?.length) {
+        await transaction.taskDependency.createMany({
+          data: dto.dependsOnIds.map((dependsOnId) => ({
+            projectId,
+            taskId: created.id,
+            dependsOnId,
+          })),
+        });
+      }
       await transaction.auditEvent.create({
         data: {
           organizationId,
@@ -415,12 +419,6 @@ export class TasksService {
               })),
             }
             : undefined,
-          dependencies: dto.dependsOnIds
-            ? {
-              deleteMany: {},
-              create: dto.dependsOnIds.map((dependsOnId) => ({ dependsOnId })),
-            }
-            : undefined,
           collaborators: dto.collaboratorIds
             ? {
               deleteMany: {},
@@ -433,6 +431,24 @@ export class TasksService {
         },
         include: this.taskInclude(),
       });
+      if (dto.dependsOnIds !== undefined) {
+        await transaction.taskDependency.deleteMany({
+          where: {
+            projectId,
+            taskId,
+          },
+        });
+
+        if (dto.dependsOnIds.length) {
+          await transaction.taskDependency.createMany({
+            data: dto.dependsOnIds.map((dependsOnId) => ({
+              projectId,
+              taskId,
+              dependsOnId,
+            })),
+          });
+        }
+      }
       const changes = [
         ['status', previous.status, updated.status],
         ['title', previous.title, updated.title],

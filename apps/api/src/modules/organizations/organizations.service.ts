@@ -7,7 +7,15 @@ import {
 } from '@nestjs/common';
 import { InvitationStatus, MembershipStatus, Prisma } from '@prisma/client';
 import { Request } from 'express';
-import { PERMISSIONS, INITIAL_PERMISSION_CATALOG } from '@coordia/shared';
+const PERMISSIONS = {
+  MEMBERSHIP_INVITE: 'membership.invite',
+  MEMBERSHIP_REMOVE: 'membership.remove',
+} as const;
+
+const INITIAL_PERMISSION_CATALOG = Object.values(PERMISSIONS).map((key) => ({
+  key,
+  description: key,
+}));
 import { AuthorizationService } from '../../common/authorization/authorization.service';
 import { PrismaService } from '../../common/database/prisma.service';
 import { SessionService } from '../auth/session.service';
@@ -25,7 +33,7 @@ export class OrganizationsService {
     @Inject(EmailService) private readonly email: EmailService,
     @Inject(AuthorizationService)
     private readonly authorization: AuthorizationService,
-  ) {}
+  ) { }
 
   async create(dto: CreateOrganizationDto, request: Request) {
     const userId = await this.sessions.requireUser(request);
@@ -73,7 +81,11 @@ export class OrganizationsService {
             where: { userId_organizationId: { userId, organizationId: organization.id } },
           });
           await transaction.membershipRole.create({
-            data: { membershipId: membership.id, roleId: ownerRole.id },
+            data: {
+              organizationId: organization.id,
+              membershipId: membership.id,
+              roleId: ownerRole.id,
+            },
           });
           await transaction.auditEvent.create({
             data: {

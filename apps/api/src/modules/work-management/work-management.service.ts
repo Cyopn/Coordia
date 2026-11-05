@@ -81,6 +81,7 @@ export class WorkManagementService {
         const parentId = item.parentIndex === undefined ? undefined : itemIds[item.parentIndex];
         const createdItem = await transaction.projectWorkItem.create({
           data: {
+            organizationId,
             templateId: created.id,
             parentId,
             title: item.title.trim(),
@@ -137,11 +138,17 @@ export class WorkManagementService {
         },
       });
       if (items) {
-        await transaction.projectWorkItem.deleteMany({ where: { templateId } });
+        await transaction.projectWorkItem.deleteMany({
+          where: {
+            organizationId,
+            templateId,
+          },
+        });
         const ids: string[] = [];
         for (const [index, item] of items.entries()) {
           const created = await transaction.projectWorkItem.create({
             data: {
+              organizationId,
               templateId,
               parentId: item.parentIndex === undefined ? undefined : ids[item.parentIndex],
               title: item.title.trim(),
@@ -248,6 +255,7 @@ export class WorkManagementService {
       for (const item of this.orderTemplateItems(template.workItems)) {
         const copy = await transaction.projectWorkItem.create({
           data: {
+            organizationId,
             projectId: created.id,
             parentId: item.parentId ? ids.get(item.parentId) : undefined,
             title: item.title,
@@ -267,6 +275,7 @@ export class WorkManagementService {
           : TaskPriority.MEDIUM;
         const task = await transaction.task.create({
           data: {
+            organizationId,
             projectId: created.id,
             parentTaskId: item.parentId ? taskIds.get(item.parentId) : undefined,
             title: item.title,
@@ -291,6 +300,7 @@ export class WorkManagementService {
           });
           await transaction.taskDependency.createMany({
             data: dependencyTaskIds.map((dependsOnId) => ({
+              projectId: created.id,
               taskId: taskIds.get(item.id)!,
               dependsOnId: dependsOnId!,
             })),

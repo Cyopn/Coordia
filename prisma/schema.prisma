@@ -30,24 +30,26 @@ datasource db {
 }
 
 model ObjectiveTask {
-  objectiveId String @db.Uuid
-  taskId      String @db.Uuid
-  objective   Objective @relation(fields: [objectiveId], references: [id], onDelete: Cascade)
-  task        Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  projectId   String    @db.Uuid
+  objectiveId String    @db.Uuid
+  taskId      String    @db.Uuid
+  objective   Objective @relation(fields: [projectId, objectiveId], references: [projectId, id], onDelete: Cascade)
+  task        Task      @relation(fields: [projectId, taskId], references: [projectId, id], onDelete: Cascade)
 
-  @@id([objectiveId, taskId])
+  @@id([projectId, objectiveId, taskId])
+  @@index([projectId, taskId])
 }
 
 model TaskComment {
-  id             String   @id @default(uuid()) @db.Uuid
-  organizationId String   @db.Uuid
-  taskId         String   @db.Uuid
-  authorId       String   @db.Uuid
+  id             String     @id @default(uuid()) @db.Uuid
+  organizationId String     @db.Uuid
+  taskId         String     @db.Uuid
+  authorId       String     @db.Uuid
   content        String
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
-  task           Task     @relation(fields: [organizationId, taskId], references: [organizationId, id], onDelete: Cascade)
-  author Membership @relation(fields: [organizationId, authorId], references: [organizationId, id], onDelete: Restrict)
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  task           Task       @relation(fields: [organizationId, taskId], references: [organizationId, id], onDelete: Cascade)
+  author         Membership @relation(fields: [organizationId, authorId], references: [organizationId, id], onDelete: Restrict)
 
   @@index([organizationId, taskId, createdAt])
 }
@@ -68,11 +70,11 @@ model TaskHistory {
 }
 
 model TaskCollaborator {
-  organizationId String      @db.Uuid
-  taskId         String      @db.Uuid
-  membershipId   String      @db.Uuid
-  task           Task        @relation(fields: [organizationId, taskId], references: [organizationId, id], onDelete: Cascade)
-  membership     Membership  @relation(fields: [organizationId, membershipId], references: [organizationId, id], onDelete: Cascade)
+  organizationId String     @db.Uuid
+  taskId         String     @db.Uuid
+  membershipId   String     @db.Uuid
+  task           Task       @relation(fields: [organizationId, taskId], references: [organizationId, id], onDelete: Cascade)
+  membership     Membership @relation(fields: [organizationId, membershipId], references: [organizationId, id], onDelete: Cascade)
 
   @@id([organizationId, taskId, membershipId])
 }
@@ -88,9 +90,10 @@ model ProjectTemplate {
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
   organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  createdBy      Membership     @relation(fields: [createdById], references: [id], onDelete: Restrict)
-  projects       Project[]
-  workItems      ProjectWorkItem[]
+  createdBy      Membership     @relation(fields: [organizationId, createdById], references: [organizationId, id], onDelete: Restrict)
+
+  projects  Project[]
+  workItems ProjectWorkItem[]
 
   @@unique([organizationId, name])
   @@unique([organizationId, id])
@@ -98,51 +101,56 @@ model ProjectTemplate {
 }
 
 model ProjectWorkItem {
-  id           String @id @default(uuid()) @db.Uuid
-  templateId   String? @db.Uuid
-  projectId    String? @db.Uuid
-  parentId     String? @db.Uuid
-  title        String
-  type         String
-  status       String?
-  priority     String?
-  estimatedHours Decimal? @db.Decimal(8, 2)
-  dependsOnIds Json?
-  sortOrder    Int @default(0)
-  template     ProjectTemplate? @relation(fields: [templateId], references: [id], onDelete: Cascade)
-  project      Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  parent       ProjectWorkItem? @relation("WorkItemTree", fields: [parentId], references: [id], onDelete: Cascade)
-  children     ProjectWorkItem[] @relation("WorkItemTree")
+  id             String  @id @default(uuid()) @db.Uuid
+  organizationId String  @db.Uuid
+  templateId     String? @db.Uuid
+  projectId      String? @db.Uuid
+  parentId       String? @db.Uuid
 
-  @@index([templateId, sortOrder])
-  @@index([projectId, sortOrder])
+  title          String
+  type           String
+  status         String?
+  priority       String?
+  estimatedHours Decimal?         @db.Decimal(8, 2)
+  dependsOnIds   Json?
+  sortOrder      Int              @default(0)
+  template       ProjectTemplate? @relation(fields: [organizationId, templateId], references: [organizationId, id], onDelete: Cascade)
+  project        Project?         @relation(fields: [organizationId, projectId], references: [organizationId, id], onDelete: Cascade)
+  parent         ProjectWorkItem? @relation("WorkItemTree", fields: [organizationId, parentId], references: [organizationId, id], onDelete: Cascade)
+
+  children ProjectWorkItem[] @relation("WorkItemTree")
+
+  @@unique([organizationId, id])
+  @@index([organizationId, templateId, sortOrder])
+  @@index([organizationId, projectId, sortOrder])
+  @@index([organizationId, parentId])
 }
 
 model WorkCapacityAdjustment {
-  id           String @id @default(uuid()) @db.Uuid
-  organizationId String @db.Uuid
-  membershipId String @db.Uuid
-  date         DateTime @db.Date
-  hours        Decimal @db.Decimal(8, 2)
-  type         WorkCapacityAdjustmentType
-  reason       String?
-  createdAt    DateTime @default(now())
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  membership     Membership     @relation(fields: [organizationId, membershipId], references: [organizationId, id], onDelete: Cascade)
+  id             String                     @id @default(uuid()) @db.Uuid
+  organizationId String                     @db.Uuid
+  membershipId   String                     @db.Uuid
+  date           DateTime                   @db.Date
+  hours          Decimal                    @db.Decimal(8, 2)
+  type           WorkCapacityAdjustmentType
+  reason         String?
+  createdAt      DateTime                   @default(now())
+  organization   Organization               @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  membership     Membership                 @relation(fields: [organizationId, membershipId], references: [organizationId, id], onDelete: Cascade)
 
   @@unique([membershipId, date])
   @@index([organizationId, date])
 }
 
 model WorkAbsence {
-  id             String      @id @default(uuid()) @db.Uuid
-  organizationId String      @db.Uuid
-  membershipId   String      @db.Uuid
-  startsAt       DateTime    @db.Date
-  endsAt         DateTime    @db.Date
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @db.Uuid
+  membershipId   String       @db.Uuid
+  startsAt       DateTime     @db.Date
+  endsAt         DateTime     @db.Date
   type           AbsenceType
   reason         String?
-  createdAt      DateTime    @default(now())
+  createdAt      DateTime     @default(now())
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   membership     Membership   @relation(fields: [organizationId, membershipId], references: [organizationId, id], onDelete: Cascade)
 
@@ -251,9 +259,9 @@ model User {
   createdInvitations  OrganizationInvitation[] @relation("InvitationCreator")
   verificationTokens  VerificationToken[]
   passwordResetTokens PasswordResetToken[]
-  emailChangeTokens  EmailChangeToken[]
-  isGlobalAdmin      Boolean                  @default(false)
-  mfaChallenges      MfaChallenge[]
+  emailChangeTokens   EmailChangeToken[]
+  isGlobalAdmin       Boolean                  @default(false)
+  mfaChallenges       MfaChallenge[]
 }
 
 model PasswordHistory {
@@ -280,46 +288,46 @@ model ConsentRecord {
 }
 
 model Organization {
-  id             String                   @id @default(uuid()) @db.Uuid
-  name           String
-  ownerId        String                   @db.Uuid
-  createdAt      DateTime                 @default(now())
-  updatedAt      DateTime                 @updatedAt
-  owner          User                     @relation("OrganizationOwner", fields: [ownerId], references: [id], onDelete: Restrict)
-  settings       OrganizationSettings?
-  memberships    Membership[]
-  invitations    OrganizationInvitation[]
-  roles          Role[]
-  auditEvents    AuditEvent[]
-  securityEvents SecurityEvent[]
-  departments    Department[]
-  teams          Team[]
-  projects       Project[]
-  labels         Label[]
-  projectTemplates ProjectTemplate[]
+  id                  String                   @id @default(uuid()) @db.Uuid
+  name                String
+  ownerId             String                   @db.Uuid
+  createdAt           DateTime                 @default(now())
+  updatedAt           DateTime                 @updatedAt
+  owner               User                     @relation("OrganizationOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+  settings            OrganizationSettings?
+  memberships         Membership[]
+  invitations         OrganizationInvitation[]
+  roles               Role[]
+  auditEvents         AuditEvent[]
+  securityEvents      SecurityEvent[]
+  departments         Department[]
+  teams               Team[]
+  projects            Project[]
+  labels              Label[]
+  projectTemplates    ProjectTemplate[]
   capacityAdjustments WorkCapacityAdjustment[]
-  absences        WorkAbsence[]
+  absences            WorkAbsence[]
 
   @@index([ownerId])
 }
 
 model Project {
-  id             String        @id @default(uuid()) @db.Uuid
-  organizationId String        @db.Uuid
+  id             String            @id @default(uuid()) @db.Uuid
+  organizationId String            @db.Uuid
   name           String
   description    String?
-  status         ProjectStatus @default(ACTIVE)
+  status         ProjectStatus     @default(ACTIVE)
   visibility     ProjectVisibility @default(ORGANIZATION)
   priority       TaskPriority      @default(MEDIUM)
   ownerId        String?           @db.Uuid
-  delayPolicy    DelayPolicy      @default(WARN)
+  delayPolicy    DelayPolicy       @default(WARN)
   configuration  Json?
   templateId     String?           @db.Uuid
   startsAt       DateTime?
   endsAt         DateTime?
-  createdAt      DateTime      @default(now())
-  updatedAt      DateTime      @updatedAt
-  organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  organization   Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   objectives     Objective[]
   tasks          Task[]
   accessGrants   ProjectAccess[]
@@ -344,31 +352,31 @@ model ProjectAccess {
 }
 
 model Task {
-  id              String       @id @default(uuid()) @db.Uuid
-  projectId       String       @db.Uuid
-  organizationId  String       @db.Uuid
-  parentTaskId    String?      @db.Uuid
-  assigneeId      String?      @db.Uuid
-  title           String
-  description     String?
-  status          TaskStatus   @default(TODO)
-  priority        TaskPriority @default(MEDIUM)
-  dueAt           DateTime?
-  startsAt        DateTime?
-  estimatedHours  Decimal?     @db.Decimal(8, 2)
-  createdAt       DateTime     @default(now())
-  updatedAt       DateTime     @updatedAt
-  project         Project      @relation(fields: [organizationId, projectId], references: [organizationId, id], onDelete: Cascade)
-  parentTask      Task?        @relation("TaskSubtasks", fields: [parentTaskId], references: [id], onDelete: Cascade)
-  subtasks        Task[]       @relation("TaskSubtasks")
-  assignee        Membership?  @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
-  labels          TaskLabel[]
-  dependencies    TaskDependency[] @relation("TaskDependencies")
-  dependents      TaskDependency[] @relation("TaskDependents")
-  comments        TaskComment[]
-  history         TaskHistory[]
-  objectiveLinks  ObjectiveTask[]
-  collaborators   TaskCollaborator[]
+  id             String             @id @default(uuid()) @db.Uuid
+  projectId      String             @db.Uuid
+  organizationId String             @db.Uuid
+  parentTaskId   String?            @db.Uuid
+  assigneeId     String?            @db.Uuid
+  title          String
+  description    String?
+  status         TaskStatus         @default(TODO)
+  priority       TaskPriority       @default(MEDIUM)
+  dueAt          DateTime?
+  startsAt       DateTime?
+  estimatedHours Decimal?           @db.Decimal(8, 2)
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+  project        Project            @relation(fields: [organizationId, projectId], references: [organizationId, id], onDelete: Cascade)
+  parentTask     Task?              @relation("TaskSubtasks", fields: [projectId, parentTaskId], references: [projectId, id], onDelete: Cascade)
+  subtasks       Task[]             @relation("TaskSubtasks")
+  assignee       Membership?        @relation("TaskAssignee", fields: [organizationId, assigneeId], references: [organizationId, id], onDelete: Restrict)
+  labels         TaskLabel[]
+  dependencies   TaskDependency[]   @relation("TaskDependencies")
+  dependents     TaskDependency[]   @relation("TaskDependents")
+  comments       TaskComment[]
+  history        TaskHistory[]
+  objectiveLinks ObjectiveTask[]
+  collaborators  TaskCollaborator[]
 
   @@unique([organizationId, id])
   @@unique([projectId, id])
@@ -392,23 +400,24 @@ model Label {
 }
 
 model TaskLabel {
-  organizationId String       @db.Uuid
-  taskId         String       @db.Uuid
-  labelId        String       @db.Uuid
-  task           Task         @relation(fields: [organizationId, taskId], references: [organizationId, id], onDelete: Cascade)
-  label          Label        @relation(fields: [organizationId, labelId], references: [organizationId, id], onDelete: Cascade)
+  organizationId String @db.Uuid
+  taskId         String @db.Uuid
+  labelId        String @db.Uuid
+  task           Task   @relation(fields: [organizationId, taskId], references: [organizationId, id], onDelete: Cascade)
+  label          Label  @relation(fields: [organizationId, labelId], references: [organizationId, id], onDelete: Cascade)
 
   @@id([organizationId, taskId, labelId])
 }
 
 model TaskDependency {
-  taskId        String @db.Uuid
-  dependsOnId   String @db.Uuid
-  task          Task   @relation("TaskDependencies", fields: [taskId], references: [id], onDelete: Cascade)
-  dependsOn     Task   @relation("TaskDependents", fields: [dependsOnId], references: [id], onDelete: Cascade)
+  projectId   String @db.Uuid
+  taskId      String @db.Uuid
+  dependsOnId String @db.Uuid
+  task        Task   @relation("TaskDependencies", fields: [projectId, taskId], references: [projectId, id], onDelete: Cascade)
+  dependsOn   Task   @relation("TaskDependents", fields: [projectId, dependsOnId], references: [projectId, id], onDelete: Cascade)
 
-  @@id([taskId, dependsOnId])
-  @@index([dependsOnId])
+  @@id([projectId, taskId, dependsOnId])
+  @@index([projectId, dependsOnId])
 }
 
 model Objective {
@@ -421,11 +430,11 @@ model Objective {
   createdAt   DateTime        @default(now())
   updatedAt   DateTime        @updatedAt
   project     Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  taskLinks    ObjectiveTask[]
+  taskLinks   ObjectiveTask[]
 
-  @@index([projectId, status])
   @@unique([projectId, title])
   @@unique([projectId, id])
+  @@index([projectId, status])
 }
 
 model Department {
@@ -461,12 +470,12 @@ model Team {
 }
 
 model TeamMember {
-  organizationId String      @db.Uuid
-  teamId         String      @db.Uuid
-  membershipId   String      @db.Uuid
-  joinedAt       DateTime    @default(now())
-  team           Team        @relation(fields: [organizationId, teamId], references: [organizationId, id], onDelete: Cascade)
-  membership     Membership   @relation(fields: [organizationId, membershipId], references: [organizationId, id], onDelete: Cascade)
+  organizationId String     @db.Uuid
+  teamId         String     @db.Uuid
+  membershipId   String     @db.Uuid
+  joinedAt       DateTime   @default(now())
+  team           Team       @relation(fields: [organizationId, teamId], references: [organizationId, id], onDelete: Cascade)
+  membership     Membership @relation(fields: [organizationId, membershipId], references: [organizationId, id], onDelete: Cascade)
 
   @@id([organizationId, teamId, membershipId])
 }
@@ -476,37 +485,37 @@ model OrganizationSettings {
   organizationId String       @unique @db.Uuid
   memberLimit    Int          @default(25)
   accountLimit   Int?
-  taskStatuses    Json?
-  taskPriorities  Json?
-  workRules       Json?
-  workingHours    Json?
-  workingDays     Json?
-  planning        Json?
+  taskStatuses   Json?
+  taskPriorities Json?
+  workRules      Json?
+  workingHours   Json?
+  workingDays    Json?
+  planning       Json?
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 }
 
 model Membership {
-  id             String           @id @default(uuid()) @db.Uuid
-  userId         String           @db.Uuid
-  organizationId String           @db.Uuid
-  status         MembershipStatus @default(ACTIVE)
-  createdAt      DateTime         @default(now())
-  updatedAt      DateTime         @updatedAt
-  user           User             @relation(fields: [userId], references: [id], onDelete: Restrict)
-  organization   Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  roles          MembershipRole[]
-  teamMemberships TeamMember[]
-  projectAccess   ProjectAccess[]
-  ownedProjects   Project[] @relation("ProjectOwner")
-  taskAssignments Task[] @relation("TaskAssignee")
-  taskCollaborations TaskCollaborator[]
-  comments        TaskComment[]
-  taskHistory     TaskHistory[]
-  createdTemplates ProjectTemplate[]
+  id                      String                   @id @default(uuid()) @db.Uuid
+  userId                  String                   @db.Uuid
+  organizationId          String                   @db.Uuid
+  status                  MembershipStatus         @default(ACTIVE)
+  createdAt               DateTime                 @default(now())
+  updatedAt               DateTime                 @updatedAt
+  user                    User                     @relation(fields: [userId], references: [id], onDelete: Restrict)
+  organization            Organization             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  roles                   MembershipRole[]
+  teamMemberships         TeamMember[]
+  projectAccess           ProjectAccess[]
+  ownedProjects           Project[]                @relation("ProjectOwner")
+  taskAssignments         Task[]                   @relation("TaskAssignee")
+  taskCollaborations      TaskCollaborator[]
+  comments                TaskComment[]
+  taskHistory             TaskHistory[]
+  createdTemplates        ProjectTemplate[]
   workCapacityAdjustments WorkCapacityAdjustment[]
-  absences WorkAbsence[]
+  absences                WorkAbsence[]
 
   @@unique([userId, organizationId])
   @@unique([organizationId, id])
@@ -564,12 +573,14 @@ model RolePermission {
 }
 
 model MembershipRole {
-  membershipId String     @db.Uuid
-  roleId       String     @db.Uuid
-  membership   Membership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
-  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  organizationId String     @db.Uuid
+  membershipId   String     @db.Uuid
+  roleId         String     @db.Uuid
+  membership     Membership @relation(fields: [organizationId, membershipId], references: [organizationId, id], onDelete: Cascade)
+  role           Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
 
-  @@id([membershipId, roleId])
+  @@id([organizationId, membershipId, roleId])
+  @@index([roleId])
 }
 
 model Session {
@@ -630,14 +641,14 @@ model MfaRecoveryCode {
 }
 
 model MfaChallenge {
-  id         String   @id @default(uuid()) @db.Uuid
-  userId     String   @db.Uuid
-  tokenHash  String   @unique
-  attempts   Int      @default(0)
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @db.Uuid
+  tokenHash  String    @unique
+  attempts   Int       @default(0)
   expiresAt  DateTime
   consumedAt DateTime?
-  createdAt  DateTime @default(now())
-  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt  DateTime  @default(now())
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, expiresAt])
 }
@@ -669,15 +680,15 @@ model PasswordResetToken {
 }
 
 model EmailChangeToken {
-  id              String    @id @default(uuid()) @db.Uuid
-  userId          String    @db.Uuid
-  targetEmail     String
+  id               String    @id @default(uuid()) @db.Uuid
+  userId           String    @db.Uuid
+  targetEmail      String
   targetNormalized String
-  tokenHash       String    @unique
-  expiresAt       DateTime
-  usedAt          DateTime?
-  createdAt       DateTime  @default(now())
-  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash        String    @unique
+  expiresAt        DateTime
+  usedAt           DateTime?
+  createdAt        DateTime  @default(now())
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, expiresAt])
   @@index([targetNormalized])
@@ -717,11 +728,11 @@ model SecurityEvent {
 }
 
 model AuthThrottle {
-  key        String   @id
-  failures   Int      @default(0)
-  resetAt    DateTime
+  key          String    @id
+  failures     Int       @default(0)
+  resetAt      DateTime
   blockedUntil DateTime?
-  updatedAt  DateTime @updatedAt
+  updatedAt    DateTime  @updatedAt
 
   @@index([resetAt])
 }
