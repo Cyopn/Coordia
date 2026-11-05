@@ -66,6 +66,16 @@ export class TasksService {
       });
       if (count !== labelIds.length) throw new NotFoundException('Una etiqueta no pertenece a la organización');
     }
+    const collaboratorIds = dto.collaboratorIds ?? [];
+    if (new Set(collaboratorIds).size !== collaboratorIds.length) {
+      throw new ConflictException('La lista de colaboradores contiene duplicados');
+    }
+    if (collaboratorIds.length > 0) {
+      const count = await this.prisma.membership.count({
+        where: { id: { in: collaboratorIds }, organizationId, status: 'ACTIVE' },
+      });
+      if (count !== collaboratorIds.length) throw new NotFoundException('Un colaborador no pertenece a la organización');
+    }
     const dependsOnIds = dto.dependsOnIds ?? [];
     if (dependsOnIds.includes(dto.parentTaskId ?? '')) {
       throw new ConflictException('Una tarea no puede depender de su tarea padre');
@@ -131,6 +141,7 @@ export class TasksService {
       throw new ConflictException('Una tarea no puede depender de sí misma');
     }
     await this.validateRelations(organizationId, projectId, dto);
+    await this.ensureNoDependencyCycle(projectId, dto.dependsOnIds ?? []);
     const task = await this.prisma.$transaction(async (transaction) => {
       const created = await transaction.task.create({
         data: {
@@ -142,11 +153,16 @@ export class TasksService {
           status: dto.status,
           priority: dto.priority,
           dueAt: dto.dueAt ? new Date(dto.dueAt) : null,
+          startsAt: dto.startsAt ? new Date(dto.startsAt) : null,
+          estimatedHours: dto.estimatedHours,
           labels: {
             create: (dto.labelIds ?? []).map((labelId) => ({ labelId })),
           },
           dependencies: {
             create: (dto.dependsOnIds ?? []).map((dependsOnId) => ({ dependsOnId })),
+          },
+          collaborators: {
+            create: (dto.collaboratorIds ?? []).map((membershipId) => ({ membershipId })),
           },
         },
         include: this.taskInclude(),
@@ -208,6 +224,54 @@ export class TasksService {
     };
   }
 
+  async getPlanning(
+    organizationId: string,
+    projectId: string,
+    request: Request,
+  ) {
+    const userId = await this.sessions.requireUser(request);
+    await this.authorization.requireProjectAccess(userId, organizationId, projectId, PERMISSIONS.PROJECT_READ);
+    const tasks = await this.prisma.task.findMany({
+      where: { projectId },
+      select: {
+        id: true,
+        title: true,
+        status: true,
+        startsAt: true,
+        dueAt: true,
+        estimatedHours: true,
+        dependencies: { select: { dependsOnId: true } },
+      },
+    });
+    const durations = new Map(tasks.map((task) => [task.id, Math.max(1, Number(task.estimatedHours ?? 1))]));
+    const finish = new Map<string, number>();
+    const visiting = new Set<string>();
+    const critical = new Set<string>();
+    const calculate = (taskId: string): number => {
+      if (finish.has(taskId)) return finish.get(taskId)!;
+      if (visiting.has(taskId)) return 0;
+      visiting.add(taskId);
+      const task = tasks.find((item) => item.id === taskId);
+      const dependencyFinish = Math.max(0, ...(task?.dependencies.map((edge) => calculate(edge.dependsOnId)) ?? []));
+      const value = dependencyFinish + (durations.get(taskId) ?? 1);
+      visiting.delete(taskId);
+      finish.set(taskId, value);
+      return value;
+    };
+    for (const task of tasks) calculate(task.id);
+    const projectDuration = Math.max(0, ...finish.values());
+    for (const task of tasks) {
+      if ((finish.get(task.id) ?? 0) >= projectDuration && projectDuration > 0) critical.add(task.id);
+    }
+    return {
+      projectId,
+      tasks,
+      blockedTaskIds: tasks.filter((task) => task.status === 'BLOCKED').map((task) => task.id),
+      criticalPathTaskIds: [...critical],
+      projectDurationHours: projectDuration,
+    };
+  }
+
   async updateTask(
     organizationId: string,
     projectId: string,
@@ -241,7 +305,12 @@ export class TasksService {
       throw new ConflictException('Una tarea no puede relacionarse consigo misma');
     }
     await this.validateRelations(organizationId, projectId, dto);
+    await this.ensureNoDependencyCycle(projectId, dto.dependsOnIds ?? [], taskId);
     return this.prisma.$transaction(async (transaction) => {
+      const previous = await transaction.task.findUniqueOrThrow({
+        where: { id: taskId },
+        select: { status: true, assigneeId: true, priority: true, dueAt: true, estimatedHours: true },
+      });
       const updated = await transaction.task.update({
         where: { id: taskId },
         data: {
@@ -252,6 +321,8 @@ export class TasksService {
           status: dto.status,
           priority: dto.priority,
           dueAt: dto.dueAt ? new Date(dto.dueAt) : null,
+          startsAt: dto.startsAt ? new Date(dto.startsAt) : null,
+          estimatedHours: dto.estimatedHours,
           labels: dto.labelIds
             ? {
                 deleteMany: {},
@@ -264,9 +335,37 @@ export class TasksService {
                 create: dto.dependsOnIds.map((dependsOnId) => ({ dependsOnId })),
               }
             : undefined,
+          collaborators: dto.collaboratorIds
+            ? {
+                deleteMany: {},
+                create: dto.collaboratorIds.map((membershipId) => ({ membershipId })),
+              }
+            : undefined,
         },
         include: this.taskInclude(),
       });
+      const changes = [
+        ['status', previous.status, updated.status],
+        ['assigneeId', previous.assigneeId, updated.assigneeId],
+        ['priority', previous.priority, updated.priority],
+        ['dueAt', previous.dueAt?.toISOString(), updated.dueAt?.toISOString()],
+        ['estimatedHours', previous.estimatedHours?.toString(), updated.estimatedHours?.toString()],
+      ].filter(([, oldValue, newValue]) => oldValue !== newValue);
+      if (changes.length) {
+        const actorMembership = await transaction.membership.findUniqueOrThrow({
+          where: { userId_organizationId: { userId, organizationId } },
+          select: { id: true },
+        });
+        await transaction.taskHistory.createMany({
+          data: changes.map(([field, oldValue, newValue]) => ({
+            taskId,
+            actorId: actorMembership.id,
+            field,
+            oldValue: oldValue == null ? null : String(oldValue),
+            newValue: newValue == null ? null : String(newValue),
+          })),
+        });
+      }
       await transaction.auditEvent.create({
         data: {
           organizationId,
@@ -281,13 +380,47 @@ export class TasksService {
     });
   }
 
+  async deleteTask(organizationId: string, projectId: string, taskId: string, request: Request) {
+    const userId = await this.requirePermission(organizationId, request, PERMISSIONS.RESOURCE_DELETE);
+    await this.projectInOrganization(userId, organizationId, projectId, PERMISSIONS.RESOURCE_DELETE);
+    const task = await this.prisma.task.findFirst({ where: { id: taskId, projectId }, select: { id: true } });
+    if (!task) throw new NotFoundException('Tarea no encontrada');
+    await this.prisma.task.delete({ where: { id: taskId } });
+    await this.audit(organizationId, userId, 'task.deleted', taskId);
+  }
+
+  private async ensureNoDependencyCycle(projectId: string, dependsOnIds: string[], taskId?: string) {
+    if (!dependsOnIds.length) return;
+    const edges = await this.prisma.taskDependency.findMany({
+      where: { task: { projectId } },
+      select: { taskId: true, dependsOnId: true },
+    });
+    const graph = new Map<string, string[]>();
+    for (const edge of edges) {
+      if (edge.taskId === taskId) continue;
+      graph.set(edge.taskId, [...(graph.get(edge.taskId) ?? []), edge.dependsOnId]);
+    }
+    for (const dependencyId of dependsOnIds) {
+      const stack = [dependencyId];
+      const visited = new Set<string>();
+      while (stack.length) {
+        const current = stack.pop();
+        if (!current || visited.has(current)) continue;
+        if (current === taskId) throw new ConflictException('La dependencia generaría un ciclo');
+        visited.add(current);
+        stack.push(...(graph.get(current) ?? []));
+      }
+    }
+  }
+
   private taskInclude() {
     return {
       labels: { include: { label: true } },
       parentTask: { select: { id: true, title: true } },
       assignee: { select: { id: true, user: { select: { id: true, email: true } } } },
       dependencies: { include: { dependsOn: { select: { id: true, title: true, status: true } } } },
-      _count: { select: { subtasks: true, dependents: true } },
+      collaborators: { include: { membership: { select: { id: true, user: { select: { id: true, email: true } } } } } },
+      _count: { select: { subtasks: true, dependents: true, comments: true } },
     } as const;
   }
 

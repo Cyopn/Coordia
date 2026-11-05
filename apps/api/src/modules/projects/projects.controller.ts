@@ -1,9 +1,10 @@
-import { Body, Controller, Get, Inject, Param, Patch, Post, Req } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Inject, Param, Patch, Post, Req } from '@nestjs/common';
 import { Request } from 'express';
 import { CreateObjectiveDto } from './dto/create-objective.dto';
 import { CreateProjectDto } from './dto/create-project.dto';
 import { UpdateObjectiveDto } from './dto/update-objective.dto';
 import { UpdateProjectDto } from './dto/update-project.dto';
+import { LinkObjectiveTaskDto } from './dto/link-objective-task.dto';
 import { ProjectsService } from './projects.service';
 
 @Controller('organizations/:organizationId')
@@ -32,6 +33,15 @@ export class ProjectsController {
     @Req() request: Request,
   ) {
     return this.projects.updateProject(organizationId, projectId, dto, request);
+  }
+
+  @Delete('projects/:projectId')
+  deleteProject(
+    @Param('organizationId') organizationId: string,
+    @Param('projectId') projectId: string,
+    @Req() request: Request,
+  ) {
+    return this.projects.deleteProject(organizationId, projectId, request);
   }
 
   @Post('projects/:projectId/objectives')
@@ -68,5 +78,27 @@ export class ProjectsController {
       dto,
       request,
     );
+  }
+
+  @Post('projects/:projectId/objectives/:objectiveId/tasks')
+  linkObjectiveTask(
+    @Param('organizationId') organizationId: string,
+    @Param('projectId') projectId: string,
+    @Param('objectiveId') objectiveId: string,
+    @Body() dto: LinkObjectiveTaskDto,
+    @Req() request: Request,
+  ) {
+    return this.projects.linkObjectiveTask(organizationId, projectId, objectiveId, dto, request);
+  }
+
+  @Delete('projects/:projectId/objectives/:objectiveId/tasks/:taskId')
+  unlinkObjectiveTask(
+    @Param('organizationId') organizationId: string,
+    @Param('projectId') projectId: string,
+    @Param('objectiveId') objectiveId: string,
+    @Param('taskId') taskId: string,
+    @Req() request: Request,
+  ) {
+    return this.projects.unlinkObjectiveTask(organizationId, projectId, objectiveId, taskId, request);
   }
 }

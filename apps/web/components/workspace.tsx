@@ -53,6 +53,7 @@ export function Workspace() {
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(true);
+  const [viewMode, setViewMode] = useState<'list' | 'kanban' | 'calendar' | 'gantt'>('list');
 
   useEffect(() => {
     void loadOrganizations();
@@ -290,6 +291,13 @@ export function Workspace() {
           <label>Prioridad<select value={priority} onChange={(event) => setPriority(event.target.value)}><option value="">Todas</option>{priorities.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
           <label>Buscar<input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Título o descripción" /></label>
         </div>
+        <nav className="view-tabs" aria-label="Vista de tareas">
+          {(['list', 'kanban', 'calendar', 'gantt'] as const).map((mode) => (
+            <button key={mode} type="button" className={viewMode === mode ? 'active' : 'secondary-button'} onClick={() => setViewMode(mode)}>
+              {mode === 'list' ? 'Lista' : mode === 'kanban' ? 'Kanban' : mode === 'calendar' ? 'Calendario' : 'Gantt'}
+            </button>
+          ))}
+        </nav>
         {message && <p role="status">{message}</p>}
         {editingTask && (
           <form className="task-editor" onSubmit={saveTask}>
@@ -312,6 +320,44 @@ export function Workspace() {
             <button type="submit">Guardar cambios</button>
           </form>
         )}
+        {viewMode === 'kanban' ? (
+          <div className="kanban-board">
+            {statuses.map((column) => (
+              <section className="kanban-column" key={column}>
+                <h3>{column}</h3>
+                {(tasks?.items.filter((task) => task.status === column) ?? []).map((task) => (
+                  <article className="task-card" key={task.id}>
+                    <h4>{task.title}</h4>
+                    <p>{task.priority}{task.dueAt ? ` · ${new Date(task.dueAt).toLocaleDateString('es-MX')}` : ''}</p>
+                    <button type="button" className="secondary-button" onClick={() => beginEdit(task)}>Editar</button>
+                  </article>
+                ))}
+              </section>
+            ))}
+          </div>
+        ) : viewMode === 'calendar' ? (
+          <div className="task-list">
+            {tasks?.items.filter((task) => task.dueAt || task.parentTask).map((task) => (
+              <article className="task-card" key={task.id}>
+                <h3>{task.title}</h3>
+                <p>{task.dueAt ? `Vence ${new Date(task.dueAt).toLocaleDateString('es-MX')}` : 'Sin fecha límite'}</p>
+                <button type="button" className="secondary-button" onClick={() => beginEdit(task)}>Editar</button>
+              </article>
+            ))}
+          </div>
+        ) : viewMode === 'gantt' ? (
+          <div className="task-list">
+            {tasks?.items.map((task) => (
+              <article className="task-card" key={task.id}>
+                <div className="gantt-row">
+                  <strong>{task.title}</strong>
+                  <span className="gantt-bar" style={{ width: `${Math.max(10, Math.min(100, (task.priority === 'URGENT' ? 100 : task.priority === 'HIGH' ? 75 : task.priority === 'MEDIUM' ? 50 : 25)))}%` }} />
+                </div>
+                <p>{task.dependencies.length ? `Precedida por ${task.dependencies.length} tarea(s)` : 'Sin dependencias'}</p>
+              </article>
+            ))}
+          </div>
+        ) : (
         <div className="task-list">
           {tasks?.items.map((task) => (
             <article className="task-card" key={task.id}>
@@ -333,6 +379,7 @@ export function Workspace() {
           ))}
           {tasks?.items.length === 0 && <p>No hay tareas con estos filtros.</p>}
         </div>
+        )}
       </section>
     </main>
   );

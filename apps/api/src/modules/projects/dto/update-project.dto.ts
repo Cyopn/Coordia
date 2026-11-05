@@ -1,5 +1,5 @@
-import { IsDateString, IsEnum, IsOptional, IsString, Length, MaxLength } from 'class-validator';
-import { ProjectStatus, ProjectVisibility } from '@prisma/client';
+import { IsDateString, IsEnum, IsObject, IsOptional, IsString, IsUUID, Length, MaxLength } from 'class-validator';
+import { DelayPolicy, ProjectStatus, ProjectVisibility, TaskPriority } from '@prisma/client';
 
 export class UpdateProjectDto {
   @IsString()
@@ -25,4 +25,20 @@ export class UpdateProjectDto {
   @IsOptional()
   @IsEnum(ProjectVisibility)
   visibility?: ProjectVisibility;
+
+  @IsOptional()
+  @IsEnum(TaskPriority)
+  priority?: TaskPriority;
+
+  @IsOptional()
+  @IsUUID()
+  ownerId?: string;
+
+  @IsOptional()
+  @IsEnum(DelayPolicy)
+  delayPolicy?: DelayPolicy;
+
+  @IsOptional()
+  @IsObject()
+  configuration?: Record<string, unknown>;
 }

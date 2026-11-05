@@ -30,6 +30,13 @@ export const PERMISSIONS = {
   RESOURCE_ASSIGN: 'resource:assign',
   RESOURCE_STATUS: 'resource:status',
   RESOURCE_DELETE: 'resource:delete',
+  TEMPLATE_READ: 'template:read',
+  TEMPLATE_MANAGE: 'template:manage',
+  COMMENT_CREATE: 'comment:create',
+  COMMENT_UPDATE: 'comment:update',
+  COMMENT_DELETE: 'comment:delete',
+  CAPACITY_READ: 'capacity:read',
+  CAPACITY_MANAGE: 'capacity:manage',
 } as const;
 
 export type PermissionKey = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
@@ -69,4 +76,11 @@ export const INITIAL_PERMISSION_CATALOG: ReadonlyArray<{
   { key: PERMISSIONS.RESOURCE_ASSIGN, description: 'Asignar recursos y tareas' },
   { key: PERMISSIONS.RESOURCE_STATUS, description: 'Cambiar estado de recursos y tareas' },
   { key: PERMISSIONS.RESOURCE_DELETE, description: 'Eliminar recursos y tareas' },
+  { key: PERMISSIONS.TEMPLATE_READ, description: 'Consultar plantillas de proyectos' },
+  { key: PERMISSIONS.TEMPLATE_MANAGE, description: 'Gestionar plantillas de proyectos' },
+  { key: PERMISSIONS.COMMENT_CREATE, description: 'Crear comentarios' },
+  { key: PERMISSIONS.COMMENT_UPDATE, description: 'Modificar comentarios propios' },
+  { key: PERMISSIONS.COMMENT_DELETE, description: 'Eliminar comentarios' },
+  { key: PERMISSIONS.CAPACITY_READ, description: 'Consultar carga y capacidad de trabajo' },
+  { key: PERMISSIONS.CAPACITY_MANAGE, description: 'Gestionar ajustes de capacidad' },
 ];

@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Inject, Param, Patch, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Inject, Param, Patch, Post, Query, Req } from '@nestjs/common';
 import { Request } from 'express';
 import { CreateLabelDto } from './dto/create-label.dto';
 import { CreateTaskDto } from './dto/create-task.dto';
@@ -44,6 +44,15 @@ export class TasksController {
     return this.tasks.listTasks(organizationId, projectId, query, request);
   }
 
+  @Get('projects/:projectId/planning')
+  getPlanning(
+    @Param('organizationId') organizationId: string,
+    @Param('projectId') projectId: string,
+    @Req() request: Request,
+  ) {
+    return this.tasks.getPlanning(organizationId, projectId, request);
+  }
+
   @Patch('projects/:projectId/tasks/:taskId')
   updateTask(
     @Param('organizationId') organizationId: string,
@@ -53,5 +62,15 @@ export class TasksController {
     @Req() request: Request,
   ) {
     return this.tasks.updateTask(organizationId, projectId, taskId, dto, request);
+  }
+
+  @Delete('projects/:projectId/tasks/:taskId')
+  deleteTask(
+    @Param('organizationId') organizationId: string,
+    @Param('projectId') projectId: string,
+    @Param('taskId') taskId: string,
+    @Req() request: Request,
+  ) {
+    return this.tasks.deleteTask(organizationId, projectId, taskId, request);
   }
 }

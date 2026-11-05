@@ -3,10 +3,12 @@ import { AuthorizationModule } from '../../common/authorization/authorization.mo
 import { AuthModule } from '../auth/auth.module';
 import { TasksController } from './tasks.controller';
 import { TasksService } from './tasks.service';
+import { TaskCommentsController } from './task-comments.controller';
+import { TaskCommentsService } from './task-comments.service';
 
 @Module({
   imports: [AuthModule, AuthorizationModule],
-  controllers: [TasksController],
-  providers: [TasksService],
+  controllers: [TasksController, TaskCommentsController],
+  providers: [TasksService, TaskCommentsService],
 })
 export class TasksModule {}
