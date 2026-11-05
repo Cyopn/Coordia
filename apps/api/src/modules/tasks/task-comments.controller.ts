@@ -9,22 +9,46 @@ export class TaskCommentsController {
   constructor(@Inject(TaskCommentsService) private readonly comments: TaskCommentsService) {}
 
   @Get()
-  list(@Param() params: Record<string, string>, @Req() request: Request) {
-    return this.comments.list(params.organizationId, params.projectId, params.taskId, request);
+  list(
+    @Param('organizationId') organizationId: string,
+    @Param('projectId') projectId: string,
+    @Param('taskId') taskId: string,
+    @Req() request: Request,
+  ) {
+    return this.comments.list(organizationId, projectId, taskId, request);
   }
 
   @Post()
-  create(@Param() params: Record<string, string>, @Body() dto: CreateTaskCommentDto, @Req() request: Request) {
-    return this.comments.create(params.organizationId, params.projectId, params.taskId, dto, request);
+  create(
+    @Param('organizationId') organizationId: string,
+    @Param('projectId') projectId: string,
+    @Param('taskId') taskId: string,
+    @Body() dto: CreateTaskCommentDto,
+    @Req() request: Request,
+  ) {
+    return this.comments.create(organizationId, projectId, taskId, dto, request);
   }
 
   @Patch(':commentId')
-  update(@Param() params: Record<string, string>, @Body() dto: UpdateTaskCommentDto, @Req() request: Request) {
-    return this.comments.update(params.organizationId, params.projectId, params.taskId, params.commentId, dto, request);
+  update(
+    @Param('organizationId') organizationId: string,
+    @Param('projectId') projectId: string,
+    @Param('taskId') taskId: string,
+    @Param('commentId') commentId: string,
+    @Body() dto: UpdateTaskCommentDto,
+    @Req() request: Request,
+  ) {
+    return this.comments.update(organizationId, projectId, taskId, commentId, dto, request);
   }
 
   @Delete(':commentId')
-  remove(@Param() params: Record<string, string>, @Req() request: Request) {
-    return this.comments.remove(params.organizationId, params.projectId, params.taskId, params.commentId, request);
+  remove(
+    @Param('organizationId') organizationId: string,
+    @Param('projectId') projectId: string,
+    @Param('taskId') taskId: string,
+    @Param('commentId') commentId: string,
+    @Req() request: Request,
+  ) {
+    return this.comments.remove(organizationId, projectId, taskId, commentId, request);
   }
 }

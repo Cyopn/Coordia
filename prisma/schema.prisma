@@ -17,6 +17,13 @@ enum WorkCapacityAdjustmentType {
   DECREASE
 }
 
+enum AbsenceType {
+  VACATION
+  SICK_LEAVE
+  PERSONAL
+  OTHER
+}
+
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
@@ -120,6 +127,22 @@ model WorkCapacityAdjustment {
 
   @@unique([membershipId, date])
   @@index([organizationId, date])
+}
+
+model WorkAbsence {
+  id             String      @id @default(uuid()) @db.Uuid
+  organizationId String      @db.Uuid
+  membershipId   String      @db.Uuid
+  startsAt       DateTime    @db.Date
+  endsAt         DateTime    @db.Date
+  type           AbsenceType
+  reason         String?
+  createdAt      DateTime    @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  membership     Membership   @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, startsAt, endsAt])
+  @@index([membershipId, startsAt, endsAt])
 }
 
 enum UserStatus {
@@ -270,6 +293,7 @@ model Organization {
   labels         Label[]
   projectTemplates ProjectTemplate[]
   capacityAdjustments WorkCapacityAdjustment[]
+  absences        WorkAbsence[]
 
   @@index([ownerId])
 }
@@ -460,7 +484,6 @@ model Membership {
   organization   Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   roles          MembershipRole[]
   teamMemberships TeamMember[]
-  assignedTasks   Task[]
   projectAccess   ProjectAccess[]
   ownedProjects   Project[] @relation("ProjectOwner")
   taskAssignments Task[] @relation("TaskAssignee")
@@ -469,6 +492,7 @@ model Membership {
   taskHistory     TaskHistory[]
   createdTemplates ProjectTemplate[]
   workCapacityAdjustments WorkCapacityAdjustment[]
+  absences WorkAbsence[]
 
   @@unique([userId, organizationId])
   @@index([organizationId, status])

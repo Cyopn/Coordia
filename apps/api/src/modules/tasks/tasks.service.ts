@@ -295,7 +295,12 @@ export class TasksService {
         PERMISSIONS.RESOURCE_ASSIGN,
       );
     }
-    await this.projectInOrganization(userId, organizationId, projectId, PERMISSIONS.RESOURCE_UPDATE);
+    const projectPermission = dto.status !== undefined
+      ? PERMISSIONS.RESOURCE_STATUS
+      : dto.assigneeId !== undefined
+        ? PERMISSIONS.RESOURCE_ASSIGN
+        : PERMISSIONS.RESOURCE_UPDATE;
+    await this.projectInOrganization(userId, organizationId, projectId, projectPermission);
     const task = await this.prisma.task.findFirst({
       where: { id: taskId, projectId },
       select: { id: true },
@@ -306,10 +311,19 @@ export class TasksService {
     }
     await this.validateRelations(organizationId, projectId, dto);
     await this.ensureNoDependencyCycle(projectId, dto.dependsOnIds ?? [], taskId);
-    return this.prisma.$transaction(async (transaction) => {
+    const updated = await this.prisma.$transaction(async (transaction) => {
       const previous = await transaction.task.findUniqueOrThrow({
         where: { id: taskId },
-        select: { status: true, assigneeId: true, priority: true, dueAt: true, estimatedHours: true },
+        select: {
+          title: true,
+          description: true,
+          status: true,
+          assigneeId: true,
+          priority: true,
+          startsAt: true,
+          dueAt: true,
+          estimatedHours: true,
+        },
       });
       const updated = await transaction.task.update({
         where: { id: taskId },
@@ -346,8 +360,11 @@ export class TasksService {
       });
       const changes = [
         ['status', previous.status, updated.status],
+        ['title', previous.title, updated.title],
+        ['description', previous.description, updated.description],
         ['assigneeId', previous.assigneeId, updated.assigneeId],
         ['priority', previous.priority, updated.priority],
+        ['startsAt', previous.startsAt?.toISOString(), updated.startsAt?.toISOString()],
         ['dueAt', previous.dueAt?.toISOString(), updated.dueAt?.toISOString()],
         ['estimatedHours', previous.estimatedHours?.toString(), updated.estimatedHours?.toString()],
       ].filter(([, oldValue, newValue]) => oldValue !== newValue);
@@ -360,7 +377,7 @@ export class TasksService {
           data: changes.map(([field, oldValue, newValue]) => ({
             taskId,
             actorId: actorMembership.id,
-            field,
+            field: String(field),
             oldValue: oldValue == null ? null : String(oldValue),
             newValue: newValue == null ? null : String(newValue),
           })),
@@ -378,6 +395,10 @@ export class TasksService {
       });
       return updated;
     });
+    if (dto.dependsOnIds !== undefined || dto.startsAt !== undefined || dto.dueAt !== undefined) {
+      await this.recalculateDependentDates(organizationId, projectId, userId);
+    }
+    return updated;
   }
 
   async deleteTask(organizationId: string, projectId: string, taskId: string, request: Request) {
@@ -400,6 +421,7 @@ export class TasksService {
       if (edge.taskId === taskId) continue;
       graph.set(edge.taskId, [...(graph.get(edge.taskId) ?? []), edge.dependsOnId]);
     }
+
     for (const dependencyId of dependsOnIds) {
       const stack = [dependencyId];
       const visited = new Set<string>();
@@ -411,6 +433,79 @@ export class TasksService {
         stack.push(...(graph.get(current) ?? []));
       }
     }
+  }
+
+  private async recalculateDependentDates(
+    organizationId: string,
+    projectId: string,
+    actorId: string,
+  ): Promise<void> {
+    const project = await this.prisma.project.findFirst({
+      where: { id: projectId, organizationId },
+      select: { delayPolicy: true },
+    });
+    if (project?.delayPolicy !== 'AUTO_RESCHEDULE') return;
+    const tasks = await this.prisma.task.findMany({
+        where: { projectId },
+        select: {
+          id: true,
+          startsAt: true,
+          dueAt: true,
+          estimatedHours: true,
+          dependencies: { select: { dependsOnId: true } },
+        },
+    });
+    const byId = new Map(tasks.map((task) => [task.id, task]));
+    const pending = new Set(tasks.map((task) => task.id));
+    let changed = true;
+    while (pending.size && changed) {
+      changed = false;
+      for (const taskId of [...pending]) {
+          const task = byId.get(taskId);
+          if (!task) {
+            pending.delete(taskId);
+            continue;
+          }
+          const dependencies = task.dependencies
+            .map(({ dependsOnId }) => byId.get(dependsOnId))
+            .filter((dependency): dependency is NonNullable<typeof dependency> => Boolean(dependency));
+          if (dependencies.some((dependency) => !dependency.dueAt)) continue;
+          if (!dependencies.length) {
+            pending.delete(taskId);
+            continue;
+          }
+          const start = new Date(Math.max(...dependencies.map((dependency) => dependency.dueAt!.getTime())));
+          const durationHours = Math.max(1, Number(task.estimatedHours ?? 1));
+          const due = new Date(start.getTime() + durationHours * 60 * 60 * 1000);
+          if (task.startsAt?.getTime() !== start.getTime() || task.dueAt?.getTime() !== due.getTime()) {
+            const oldStartsAt = task.startsAt?.toISOString();
+            const oldDueAt = task.dueAt?.toISOString();
+            const actorMembershipId = await this.membershipId(actorId, organizationId);
+            const updated = await this.prisma.task.update({
+              where: { id: task.id },
+              data: { startsAt: start, dueAt: due },
+            });
+            task.startsAt = updated.startsAt;
+            task.dueAt = updated.dueAt;
+            await this.prisma.taskHistory.createMany({
+              data: [
+                { taskId: task.id, actorId: actorMembershipId, field: 'startsAt', oldValue: oldStartsAt, newValue: start.toISOString() },
+                { taskId: task.id, actorId: actorMembershipId, field: 'dueAt', oldValue: oldDueAt, newValue: due.toISOString() },
+              ],
+            });
+          }
+          pending.delete(taskId);
+          changed = true;
+      }
+    }
+  }
+
+  private async membershipId(userId: string, organizationId: string): Promise<string> {
+    const membership = await this.prisma.membership.findUniqueOrThrow({
+      where: { userId_organizationId: { userId, organizationId } },
+      select: { id: true },
+    });
+    return membership.id;
   }
 
   private taskInclude() {

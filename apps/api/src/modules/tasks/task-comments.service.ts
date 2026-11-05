@@ -59,10 +59,12 @@ export class TaskCommentsService {
     });
     if (!comment) throw new NotFoundException('Comentario no encontrado');
     if (comment.author.userId !== userId) throw new ForbiddenException('Solo puedes modificar tus comentarios');
-    return this.prisma.taskComment.update({
+    const updated = await this.prisma.taskComment.update({
       where: { id: commentId },
       data: { content: dto.content.trim() },
     });
+    await this.audit(organizationId, userId, 'task.comment_updated', commentId);
+    return updated;
   }
 
   async remove(

@@ -1,6 +1,7 @@
 CREATE TYPE "DelayPolicy" AS ENUM ('WARN', 'AUTO_RESCHEDULE');
 CREATE TYPE "TemplateStatus" AS ENUM ('ACTIVE', 'ARCHIVED');
 CREATE TYPE "WorkCapacityAdjustmentType" AS ENUM ('INCREASE', 'DECREASE');
+CREATE TYPE "AbsenceType" AS ENUM ('VACATION', 'SICK_LEAVE', 'PERSONAL', 'OTHER');
 
 ALTER TABLE "OrganizationSettings"
   ADD COLUMN "taskStatuses" JSONB,
@@ -93,6 +94,18 @@ CREATE TABLE "WorkCapacityAdjustment" (
   CONSTRAINT "WorkCapacityAdjustment_pkey" PRIMARY KEY ("id")
 );
 
+CREATE TABLE "WorkAbsence" (
+  "id" UUID NOT NULL DEFAULT gen_random_uuid(),
+  "organizationId" UUID NOT NULL,
+  "membershipId" UUID NOT NULL,
+  "startsAt" DATE NOT NULL,
+  "endsAt" DATE NOT NULL,
+  "type" "AbsenceType" NOT NULL,
+  "reason" TEXT,
+  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT "WorkAbsence_pkey" PRIMARY KEY ("id")
+);
+
 CREATE UNIQUE INDEX "ProjectTemplate_organizationId_name_key" ON "ProjectTemplate"("organizationId", "name");
 CREATE INDEX "ProjectTemplate_organizationId_status_idx" ON "ProjectTemplate"("organizationId", "status");
 CREATE INDEX "ObjectiveTask_taskId_idx" ON "ObjectiveTask"("taskId");
@@ -102,6 +115,8 @@ CREATE INDEX "ProjectWorkItem_templateId_sortOrder_idx" ON "ProjectWorkItem"("te
 CREATE INDEX "ProjectWorkItem_projectId_sortOrder_idx" ON "ProjectWorkItem"("projectId", "sortOrder");
 CREATE UNIQUE INDEX "WorkCapacityAdjustment_membershipId_date_key" ON "WorkCapacityAdjustment"("membershipId", "date");
 CREATE INDEX "WorkCapacityAdjustment_organizationId_date_idx" ON "WorkCapacityAdjustment"("organizationId", "date");
+CREATE INDEX "WorkAbsence_organizationId_startsAt_endsAt_idx" ON "WorkAbsence"("organizationId", "startsAt", "endsAt");
+CREATE INDEX "WorkAbsence_membershipId_startsAt_endsAt_idx" ON "WorkAbsence"("membershipId", "startsAt", "endsAt");
 
 ALTER TABLE "Project" ADD CONSTRAINT "Project_ownerId_fkey"
   FOREIGN KEY ("ownerId") REFERENCES "Membership"("id") ON DELETE SET NULL ON UPDATE CASCADE;
@@ -136,4 +151,8 @@ ALTER TABLE "ProjectWorkItem" ADD CONSTRAINT "ProjectWorkItem_parentId_fkey"
 ALTER TABLE "WorkCapacityAdjustment" ADD CONSTRAINT "WorkCapacityAdjustment_organizationId_fkey"
   FOREIGN KEY ("organizationId") REFERENCES "Organization"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 ALTER TABLE "WorkCapacityAdjustment" ADD CONSTRAINT "WorkCapacityAdjustment_membershipId_fkey"
+  FOREIGN KEY ("membershipId") REFERENCES "Membership"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "WorkAbsence" ADD CONSTRAINT "WorkAbsence_organizationId_fkey"
+  FOREIGN KEY ("organizationId") REFERENCES "Organization"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "WorkAbsence" ADD CONSTRAINT "WorkAbsence_membershipId_fkey"
   FOREIGN KEY ("membershipId") REFERENCES "Membership"("id") ON DELETE CASCADE ON UPDATE CASCADE;

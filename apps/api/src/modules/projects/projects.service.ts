@@ -61,6 +61,10 @@ export class ProjectsService {
       if (!template) throw new NotFoundException('Plantilla no encontrada');
     }
     try {
+      const projectConfiguration = await this.projectConfiguration(
+        organizationId,
+        dto.configuration,
+      );
       const project = await this.prisma.project.create({
         data: {
           organizationId,
@@ -68,7 +72,7 @@ export class ProjectsService {
           description: dto.description?.trim() || null,
           priority: dto.priority,
           delayPolicy: dto.delayPolicy,
-          configuration: dto.configuration,
+          configuration: projectConfiguration as Prisma.InputJsonValue,
           templateId: dto.templateId,
           ownerId: dto.ownerId,
           startsAt: dto.startsAt ? new Date(dto.startsAt) : null,
@@ -125,6 +129,12 @@ export class ProjectsService {
     if (dto.startsAt && dto.endsAt && new Date(dto.endsAt) < new Date(dto.startsAt)) {
       throw new ConflictException('La fecha de finalización no puede preceder a la de inicio');
     }
+    if (dto.ownerId) await this.ensureMembership(organizationId, dto.ownerId);
+    const currentProject = await this.prisma.project.findFirst({
+      where: { id: projectId, organizationId },
+      select: { configuration: true, visibility: true, ownerId: true },
+    });
+    if (!currentProject) throw new NotFoundException('Proyecto no encontrado');
     try {
       const project = await this.prisma.project.update({
         where: { id: projectId },
@@ -134,34 +144,49 @@ export class ProjectsService {
           status: dto.status,
           priority: dto.priority,
           delayPolicy: dto.delayPolicy,
-          configuration: dto.configuration,
+          configuration: (dto.configuration ?? currentProject.configuration ?? undefined) as Prisma.InputJsonValue | undefined,
           ownerId: dto.ownerId,
           startsAt: dto.startsAt ? new Date(dto.startsAt) : null,
           endsAt: dto.endsAt ? new Date(dto.endsAt) : null,
           visibility: dto.visibility,
         },
       });
+      if (project.visibility === 'PRIVATE') {
+        const ownerMembershipId = dto.ownerId ?? currentProject.ownerId;
+        const membershipId = ownerMembershipId ?? (
+          await this.prisma.membership.findUniqueOrThrow({
+            where: { userId_organizationId: { userId, organizationId } },
+            select: { id: true },
+          })
+        ).id;
+        await this.prisma.projectAccess.upsert({
+          where: { projectId_membershipId: { projectId, membershipId } },
+          create: { projectId, membershipId },
+          update: {},
+        });
+      }
       await this.audit(organizationId, userId, 'project.updated', project.id);
       return project;
     } catch (error) {
       this.throwDuplicate(error, 'Ya existe un proyecto con ese nombre');
     }
-
-    async deleteProject(organizationId: string, projectId: string, request: Request) {
-      const userId = await this.userWithPermission(organizationId, request, PERMISSIONS.PROJECT_DELETE);
-      await this.projectInOrganization(userId, organizationId, projectId, PERMISSIONS.PROJECT_DELETE);
-      await this.prisma.project.delete({ where: { id: projectId } });
-      await this.audit(organizationId, userId, 'project.deleted', projectId);
-    }
-
-    private async ensureMembership(organizationId: string, membershipId: string) {
-      const membership = await this.prisma.membership.findFirst({
-        where: { id: membershipId, organizationId, status: 'ACTIVE' },
-        select: { id: true },
-      });
-      if (!membership) throw new NotFoundException('La persona responsable no pertenece a la organización');
-    }
   }
+
+  async deleteProject(organizationId: string, projectId: string, request: Request) {
+    const userId = await this.userWithPermission(organizationId, request, PERMISSIONS.PROJECT_DELETE);
+    await this.projectInOrganization(userId, organizationId, projectId, PERMISSIONS.PROJECT_DELETE);
+    await this.prisma.project.delete({ where: { id: projectId } });
+    await this.audit(organizationId, userId, 'project.deleted', projectId);
+  }
+
+  private async ensureMembership(organizationId: string, membershipId: string) {
+    const membership = await this.prisma.membership.findFirst({
+      where: { id: membershipId, organizationId, status: 'ACTIVE' },
+      select: { id: true },
+    });
+    if (!membership) throw new NotFoundException('La persona responsable no pertenece a la organización');
+  }
+
 
   async createObjective(
     organizationId: string,
@@ -234,38 +259,85 @@ export class ProjectsService {
     } catch (error) {
       this.throwDuplicate(error, 'Ya existe un objetivo con ese título');
     }
+  }
 
-    async linkObjectiveTask(
-      organizationId: string,
-      projectId: string,
-      objectiveId: string,
-      dto: LinkObjectiveTaskDto,
-      request: Request,
-    ) {
-      const userId = await this.userWithPermission(organizationId, request, PERMISSIONS.PROJECT_UPDATE);
-      await this.projectInOrganization(userId, organizationId, projectId, PERMISSIONS.PROJECT_UPDATE);
-      const objective = await this.prisma.objective.findFirst({ where: { id: objectiveId, projectId }, select: { id: true } });
-      const task = await this.prisma.task.findFirst({ where: { id: dto.taskId, projectId }, select: { id: true } });
-      if (!objective || !task) throw new NotFoundException('Objetivo o tarea no encontrados');
-      const link = await this.prisma.objectiveTask.create({ data: { objectiveId, taskId: dto.taskId } });
-      await this.audit(organizationId, userId, 'objective.task_linked', dto.taskId);
-      return link;
-    }
+  async linkObjectiveTask(
+    organizationId: string,
+    projectId: string,
+    objectiveId: string,
+    dto: LinkObjectiveTaskDto,
+    request: Request,
+  ) {
+    const userId = await this.userWithPermission(
+      organizationId,
+      request,
+      PERMISSIONS.PROJECT_UPDATE,
+    );
+    await this.projectInOrganization(userId, organizationId, projectId, PERMISSIONS.PROJECT_UPDATE);
+    const [objective, task] = await Promise.all([
+      this.prisma.objective.findFirst({ where: { id: objectiveId, projectId }, select: { id: true } }),
+      this.prisma.task.findFirst({ where: { id: dto.taskId, projectId }, select: { id: true } }),
+    ]);
+    if (!objective || !task) throw new NotFoundException('Objetivo o tarea no encontrados');
+    const link = await this.prisma.objectiveTask.create({
+      data: { objectiveId, taskId: dto.taskId },
+    });
+    await this.audit(organizationId, userId, 'objective.task_linked', dto.taskId);
+    return link;
+  }
 
-    async unlinkObjectiveTask(
-      organizationId: string,
-      projectId: string,
-      objectiveId: string,
-      taskId: string,
-      request: Request,
-    ) {
-      const userId = await this.userWithPermission(organizationId, request, PERMISSIONS.PROJECT_UPDATE);
-      await this.projectInOrganization(userId, organizationId, projectId, PERMISSIONS.PROJECT_UPDATE);
-      const objective = await this.prisma.objective.findFirst({ where: { id: objectiveId, projectId }, select: { id: true } });
-      if (!objective) throw new NotFoundException('Objetivo no encontrado');
-      await this.prisma.objectiveTask.delete({ where: { objectiveId_taskId: { objectiveId, taskId } } });
-      await this.audit(organizationId, userId, 'objective.task_unlinked', taskId);
-    }
+  async unlinkObjectiveTask(
+    organizationId: string,
+    projectId: string,
+    objectiveId: string,
+    taskId: string,
+    request: Request,
+  ) {
+    const userId = await this.userWithPermission(
+      organizationId,
+      request,
+      PERMISSIONS.PROJECT_UPDATE,
+    );
+    await this.projectInOrganization(userId, organizationId, projectId, PERMISSIONS.PROJECT_UPDATE);
+    const objective = await this.prisma.objective.findFirst({
+      where: { id: objectiveId, projectId },
+      select: { id: true },
+    });
+    const task = await this.prisma.task.findFirst({
+      where: { id: taskId, projectId },
+      select: { id: true },
+    });
+    if (!objective || !task) throw new NotFoundException('Objetivo o tarea no encontrados');
+    await this.prisma.objectiveTask.delete({
+      where: { objectiveId_taskId: { objectiveId, taskId } },
+    });
+    await this.audit(organizationId, userId, 'objective.task_unlinked', taskId);
+  }
+
+  private async projectConfiguration(
+    organizationId: string,
+    customConfiguration?: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const settings = await this.prisma.organizationSettings.findUnique({
+      where: { organizationId },
+      select: {
+        taskStatuses: true,
+        taskPriorities: true,
+        workRules: true,
+        workingHours: true,
+        workingDays: true,
+        planning: true,
+      },
+    });
+    return {
+      taskStatuses: settings?.taskStatuses ?? ['TODO', 'IN_PROGRESS', 'BLOCKED', 'DONE', 'CANCELLED'],
+      taskPriorities: settings?.taskPriorities ?? ['LOW', 'MEDIUM', 'HIGH', 'URGENT'],
+      workRules: settings?.workRules ?? {},
+      workingHours: settings?.workingHours ?? { start: '09:00', end: '17:00' },
+      workingDays: settings?.workingDays ?? [1, 2, 3, 4, 5],
+      planning: settings?.planning ?? { delayPolicy: 'WARN' },
+      ...customConfiguration,
+    };
   }
 
   private async audit(

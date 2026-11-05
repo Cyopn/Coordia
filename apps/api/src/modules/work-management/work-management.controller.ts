@@ -1,6 +1,7 @@
 import { Body, Controller, Get, Inject, Param, Patch, Post, Query, Req } from '@nestjs/common';
 import { Request } from 'express';
 import { CreateCapacityAdjustmentDto } from './dto/create-capacity-adjustment.dto';
+import { CreateAbsenceDto } from './dto/create-absence.dto';
 import { CreateTemplateDto } from './dto/create-template.dto';
 import { UpdateOrganizationSettingsDto } from './dto/update-organization-settings.dto';
 import { WorkManagementService } from './work-management.service';
@@ -42,6 +43,11 @@ export class WorkManagementController {
   @Post('capacity-adjustments')
   addCapacityAdjustment(@Param('organizationId') organizationId: string, @Body() dto: CreateCapacityAdjustmentDto, @Req() request: Request) {
     return this.work.addCapacityAdjustment(organizationId, dto, request);
+  }
+
+  @Post('absences')
+  addAbsence(@Param('organizationId') organizationId: string, @Body() dto: CreateAbsenceDto, @Req() request: Request) {
+    return this.work.addAbsence(organizationId, dto, request);
   }
 
   @Get('workload')
