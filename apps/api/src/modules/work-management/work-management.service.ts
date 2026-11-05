@@ -364,36 +364,170 @@ export class WorkManagementService {
   }
 
   async getWorkload(organizationId: string, request: Request, from?: string, to?: string) {
-    const userId = await this.authorized(organizationId, request, PERMISSIONS.CAPACITY_READ);
+    const userId = await this.authorized(
+      organizationId,
+      request,
+      PERMISSIONS.CAPACITY_READ,
+    );
     void userId;
+
     const start = from ? new Date(from) : new Date();
-    const end = to ? new Date(to) : new Date(start.getTime() + 30 * 86400000);
-    const [memberships, settings, tasks, adjustments, absences] = await this.prisma.$transaction([
-      this.prisma.membership.findMany({
-        where: { organizationId, status: 'ACTIVE' },
-        include: { user: { select: { id: true, email: true } } },
-      }),
-      this.prisma.organizationSettings.findUnique({ where: { organizationId } }),
-      this.prisma.task.findMany({
-        where: { project: { organizationId }, assigneeId: { not: null }, startsAt: { lt: end }, dueAt: { gte: start } },
-        select: { assigneeId: true, estimatedHours: true, startsAt: true, dueAt: true },
-      }),
-      this.prisma.workCapacityAdjustment.findMany({ where: { organizationId, date: { gte: start, lte: end } } }),
-      this.prisma.workAbsence.findMany({ where: { organizationId, startsAt: { lte: end }, endsAt: { gte: start } } }),
-    ]);
+    const end = to
+      ? new Date(to)
+      : new Date(start.getTime() + 30 * 86400000);
+
+    if (
+      !Number.isFinite(start.getTime()) ||
+      !Number.isFinite(end.getTime()) ||
+      end < start
+    ) {
+      throw new ForbiddenException('El intervalo de consulta no es válido');
+    }
+
+    const [memberships, settings, tasks, adjustments, absences] =
+      await this.prisma.$transaction([
+        this.prisma.membership.findMany({
+          where: { organizationId, status: 'ACTIVE' },
+          include: {
+            user: { select: { id: true, email: true } },
+          },
+        }),
+
+        this.prisma.organizationSettings.findUnique({
+          where: { organizationId },
+        }),
+
+        this.prisma.task.findMany({
+          where: {
+            project: { organizationId },
+            assigneeId: { not: null },
+            status: {
+              notIn: ['DONE', 'CANCELLED'],
+            },
+          },
+          select: {
+            id: true,
+            assigneeId: true,
+            estimatedHours: true,
+            startsAt: true,
+            dueAt: true,
+            status: true,
+          },
+        }),
+
+        this.prisma.workCapacityAdjustment.findMany({
+          where: {
+            organizationId,
+            date: {
+              gte: this.startOfUtcDay(start),
+              lte: this.startOfUtcDay(end),
+            },
+          },
+        }),
+
+        this.prisma.workAbsence.findMany({
+          where: {
+            organizationId,
+            startsAt: { lte: this.startOfUtcDay(end) },
+            endsAt: { gte: this.startOfUtcDay(start) },
+          },
+        }),
+      ]);
+
     const workingDays = this.workingDays(settings?.workingDays);
     const dailyHours = this.workingHours(settings?.workingHours);
+
     return memberships.map((membership) => {
-      const assigned = tasks.filter((task) => task.assigneeId === membership.id)
-        .reduce((sum, task) => sum + this.distributedTaskHours(task, start, end, workingDays), 0);
-      const memberAbsences = absences.filter((item) => item.membershipId === membership.id);
-      const absenceHours = memberAbsences.reduce((sum, item) => sum + this.overlapWorkingHours(
-        item.startsAt, item.endsAt, start, end, workingDays, dailyHours,
-      ), 0);
-      const adjusted = adjustments.filter((item) => item.membershipId === membership.id)
-        .reduce((sum, item) => sum + (item.type === 'INCREASE' ? Number(item.hours) : -Number(item.hours)), 0);
-      const capacity = Math.max(0, this.workingDaysBetween(start, end, workingDays) * dailyHours - absenceHours + adjusted);
-      return { membershipId: membership.id, user: membership.user, assignedHours: assigned, capacityHours: capacity, overCapacity: assigned > capacity };
+      const memberTasks = tasks.filter(
+        (task) => task.assigneeId === membership.id,
+      );
+
+      const unplannedTaskCount = memberTasks.filter(
+        (task) => !task.startsAt || !task.dueAt,
+      ).length;
+
+      const unestimatedTaskCount = memberTasks.filter(
+        (task) =>
+          task.startsAt &&
+          task.dueAt &&
+          Number(task.estimatedHours ?? 0) <= 0,
+      ).length;
+
+      const plannedTasks = memberTasks.filter(
+        (task) =>
+          task.startsAt &&
+          task.dueAt &&
+          Number(task.estimatedHours ?? 0) > 0,
+      );
+
+      const memberAdjustments = adjustments.filter(
+        (item) => item.membershipId === membership.id,
+      );
+
+      const memberAbsences = absences.filter(
+        (item) => item.membershipId === membership.id,
+      );
+
+      let assignedHours = 0;
+      let capacityHours = 0;
+      let overCapacity = false;
+
+      for (const date of this.eachUtcDay(start, end)) {
+        const dateKey = this.dateKey(date);
+        const isWorkingDay = workingDays.includes(date.getUTCDay() || 7);
+
+        if (!isWorkingDay) continue;
+
+        const absent = memberAbsences.some((absence) => {
+          const absenceStart = this.startOfUtcDay(absence.startsAt);
+          const absenceEnd = this.startOfUtcDay(absence.endsAt);
+
+          return date >= absenceStart && date <= absenceEnd;
+        });
+
+        const adjustment = memberAdjustments
+          .filter((item) => this.dateKey(item.date) === dateKey)
+          .reduce(
+            (sum, item) =>
+              sum +
+              (item.type === 'INCREASE'
+                ? Number(item.hours)
+                : -Number(item.hours)),
+            0,
+          );
+
+        const dailyCapacity = absent
+          ? 0
+          : Math.max(0, dailyHours + adjustment);
+
+        let dailyAssigned = 0;
+
+        for (const task of plannedTasks) {
+          dailyAssigned += this.taskHoursOnDay(
+            task,
+            date,
+            Number(task.estimatedHours ?? 0),
+            workingDays,
+          );
+        }
+
+        assignedHours += dailyAssigned;
+        capacityHours += dailyCapacity;
+
+        if (dailyAssigned > dailyCapacity + 0.0001) {
+          overCapacity = true;
+        }
+      }
+
+      return {
+        membershipId: membership.id,
+        user: membership.user,
+        assignedHours: Number(assignedHours.toFixed(2)),
+        capacityHours: Number(capacityHours.toFixed(2)),
+        overCapacity,
+        unplannedTaskCount,
+        unestimatedTaskCount,
+      };
     });
   }
 
@@ -408,57 +542,90 @@ export class WorkManagementService {
   }
 
   private workingDays(value: unknown): number[] {
-    return Array.isArray(value) && value.every((day) => Number.isInteger(day))
+    return Array.isArray(value) &&
+      value.length > 0 &&
+      value.every(
+        (day) =>
+          Number.isInteger(day) &&
+          Number(day) >= 1 &&
+          Number(day) <= 7,
+      ) &&
+      new Set(value).size === value.length
       ? value as number[]
       : [1, 2, 3, 4, 5];
   }
 
-  private workingDaysBetween(start: Date, end: Date, days: number[]): number {
-    let total = 0;
-    const cursor = new Date(start);
-    cursor.setHours(0, 0, 0, 0);
-    const last = new Date(end);
-    last.setHours(0, 0, 0, 0);
-    while (cursor <= last) {
-      if (days.includes(cursor.getDay() || 7)) total += 1;
-      cursor.setDate(cursor.getDate() + 1);
-    }
-    return total;
+  private startOfUtcDay(value: Date): Date {
+    return new Date(Date.UTC(
+      value.getUTCFullYear(),
+      value.getUTCMonth(),
+      value.getUTCDate(),
+    ));
   }
 
-  private distributedTaskHours(
-    task: { estimatedHours: unknown; startsAt?: Date | null; dueAt?: Date | null },
-    periodStart: Date,
-    periodEnd: Date,
+  private dateKey(value: Date): string {
+    return this.startOfUtcDay(value).toISOString().slice(0, 10);
+  }
+
+  private eachUtcDay(start: Date, end: Date): Date[] {
+    const dates: Date[] = [];
+    const cursor = this.startOfUtcDay(start);
+    const last = this.startOfUtcDay(end);
+
+    while (cursor <= last) {
+      dates.push(new Date(cursor));
+      cursor.setUTCDate(cursor.getUTCDate() + 1);
+    }
+
+    return dates;
+  }
+
+  private workingDaysBetween(
+    start: Date,
+    end: Date,
+    days: number[],
+  ): number {
+    if (end < start) return 0;
+
+    return this.eachUtcDay(start, end).filter((date) =>
+      days.includes(date.getUTCDay() || 7),
+    ).length;
+  }
+
+  private taskHoursOnDay(
+    task: {
+      startsAt: Date | null;
+      dueAt: Date | null;
+    },
+    date: Date,
+    estimatedHours: number,
     workingDays: number[],
   ): number {
-    const taskStart = task.startsAt ?? task.dueAt ?? periodStart;
-    const taskEnd = task.dueAt ?? task.startsAt ?? periodEnd;
-    if (taskEnd < periodStart || taskStart > periodEnd) return 0;
-    const totalDays = this.workingDaysBetween(taskStart, taskEnd, workingDays);
-    if (!totalDays) return 0;
-    const overlapDays = this.workingDaysBetween(
-      new Date(Math.max(taskStart.getTime(), periodStart.getTime())),
-      new Date(Math.min(taskEnd.getTime(), periodEnd.getTime())),
+    if (!task.startsAt || !task.dueAt || estimatedHours <= 0) {
+      return 0;
+    }
+
+    const start = this.startOfUtcDay(task.startsAt);
+    const end = this.startOfUtcDay(task.dueAt);
+
+    if (end < start || date < start || date > end) {
+      return 0;
+    }
+
+    const totalWorkingDays = this.workingDaysBetween(
+      start,
+      end,
       workingDays,
     );
-    return Number(task.estimatedHours ?? 0) * overlapDays / totalDays;
-  }
 
-  private overlapWorkingHours(
-    absenceStart: Date,
-    absenceEnd: Date,
-    periodStart: Date,
-    periodEnd: Date,
-    workingDays: number[],
-    dailyHours: number,
-  ): number {
-    if (absenceEnd < periodStart || absenceStart > periodEnd) return 0;
-    return this.workingDaysBetween(
-      new Date(Math.max(absenceStart.getTime(), periodStart.getTime())),
-      new Date(Math.min(absenceEnd.getTime(), periodEnd.getTime())),
-      workingDays,
-    ) * dailyHours;
+    if (
+      totalWorkingDays === 0 ||
+      !workingDays.includes(date.getUTCDay() || 7)
+    ) {
+      return 0;
+    }
+
+    return estimatedHours / totalWorkingDays;
   }
 
   private validateTemplateItems(items: CreateTemplateDto['items']) {

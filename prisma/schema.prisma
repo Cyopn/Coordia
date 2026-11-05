@@ -39,39 +39,42 @@ model ObjectiveTask {
 }
 
 model TaskComment {
-  id        String   @id @default(uuid()) @db.Uuid
-  taskId    String   @db.Uuid
-  authorId  String   @db.Uuid
-  content   String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  author    Membership @relation(fields: [authorId], references: [id], onDelete: Restrict)
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @db.Uuid
+  taskId         String   @db.Uuid
+  authorId       String   @db.Uuid
+  content        String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  task           Task     @relation(fields: [organizationId, taskId], references: [organizationId, id], onDelete: Cascade)
+  author Membership @relation(fields: [organizationId, authorId], references: [organizationId, id], onDelete: Restrict)
 
-  @@index([taskId, createdAt])
+  @@index([organizationId, taskId, createdAt])
 }
 
 model TaskHistory {
-  id        String   @id @default(uuid()) @db.Uuid
-  taskId    String   @db.Uuid
-  actorId   String   @db.Uuid
-  field     String
-  oldValue  String?
-  newValue  String?
-  createdAt DateTime @default(now())
-  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  actor     Membership @relation(fields: [actorId], references: [id], onDelete: Restrict)
+  id             String     @id @default(uuid()) @db.Uuid
+  organizationId String     @db.Uuid
+  taskId         String     @db.Uuid
+  actorId        String     @db.Uuid
+  field          String
+  oldValue       String?
+  newValue       String?
+  createdAt      DateTime   @default(now())
+  task           Task       @relation(fields: [organizationId, taskId], references: [organizationId, id], onDelete: Cascade)
+  actor          Membership @relation(fields: [organizationId, actorId], references: [organizationId, id], onDelete: Restrict)
 
-  @@index([taskId, createdAt])
+  @@index([organizationId, taskId, createdAt])
 }
 
 model TaskCollaborator {
-  taskId       String @db.Uuid
-  membershipId String @db.Uuid
-  task         Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  membership   Membership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+  organizationId String      @db.Uuid
+  taskId         String      @db.Uuid
+  membershipId   String      @db.Uuid
+  task           Task        @relation(fields: [organizationId, taskId], references: [organizationId, id], onDelete: Cascade)
+  membership     Membership  @relation(fields: [organizationId, membershipId], references: [organizationId, id], onDelete: Cascade)
 
-  @@id([taskId, membershipId])
+  @@id([organizationId, taskId, membershipId])
 }
 
 model ProjectTemplate {
@@ -90,6 +93,7 @@ model ProjectTemplate {
   workItems      ProjectWorkItem[]
 
   @@unique([organizationId, name])
+  @@unique([organizationId, id])
   @@index([organizationId, status])
 }
 
@@ -319,28 +323,30 @@ model Project {
   objectives     Objective[]
   tasks          Task[]
   accessGrants   ProjectAccess[]
-  owner          Membership?       @relation("ProjectOwner", fields: [ownerId], references: [id], onDelete: SetNull)
-  template       ProjectTemplate?  @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  owner          Membership?       @relation("ProjectOwner", fields: [organizationId, ownerId], references: [organizationId, id], onDelete: Restrict)
+  template       ProjectTemplate?  @relation(fields: [organizationId, templateId], references: [organizationId, id], onDelete: Restrict)
   workItems      ProjectWorkItem[]
 
   @@unique([organizationId, name])
+  @@unique([organizationId, id])
   @@index([organizationId, status])
 }
 
 model ProjectAccess {
-  projectId    String     @db.Uuid
-  membershipId String     @db.Uuid
-  project      Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  membership   Membership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
-  createdAt    DateTime   @default(now())
+  organizationId String     @db.Uuid
+  projectId      String     @db.Uuid
+  membershipId   String     @db.Uuid
+  createdAt      DateTime   @default(now())
+  project        Project    @relation(fields: [organizationId, projectId], references: [organizationId, id], onDelete: Cascade)
+  membership     Membership @relation(fields: [organizationId, membershipId], references: [organizationId, id], onDelete: Cascade)
 
-  @@id([projectId, membershipId])
-  @@index([membershipId])
+  @@id([organizationId, projectId, membershipId])
 }
 
 model Task {
   id              String       @id @default(uuid()) @db.Uuid
   projectId       String       @db.Uuid
+  organizationId  String       @db.Uuid
   parentTaskId    String?      @db.Uuid
   assigneeId      String?      @db.Uuid
   title           String
@@ -349,10 +355,10 @@ model Task {
   priority        TaskPriority @default(MEDIUM)
   dueAt           DateTime?
   startsAt        DateTime?
-  estimatedHours  Decimal?         @db.Decimal(8, 2)
+  estimatedHours  Decimal?     @db.Decimal(8, 2)
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @updatedAt
-  project         Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project         Project      @relation(fields: [organizationId, projectId], references: [organizationId, id], onDelete: Cascade)
   parentTask      Task?        @relation("TaskSubtasks", fields: [parentTaskId], references: [id], onDelete: Cascade)
   subtasks        Task[]       @relation("TaskSubtasks")
   assignee        Membership?  @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
@@ -364,6 +370,8 @@ model Task {
   objectiveLinks  ObjectiveTask[]
   collaborators   TaskCollaborator[]
 
+  @@unique([organizationId, id])
+  @@unique([projectId, id])
   @@index([projectId, status, priority])
   @@index([parentTaskId])
   @@index([assigneeId])
@@ -379,16 +387,18 @@ model Label {
   tasks          TaskLabel[]
 
   @@unique([organizationId, name])
+  @@unique([organizationId, id])
   @@index([organizationId, name])
 }
 
 model TaskLabel {
-  taskId  String @db.Uuid
-  labelId String @db.Uuid
-  task    Task   @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  label   Label  @relation(fields: [labelId], references: [id], onDelete: Cascade)
+  organizationId String       @db.Uuid
+  taskId         String       @db.Uuid
+  labelId        String       @db.Uuid
+  task           Task         @relation(fields: [organizationId, taskId], references: [organizationId, id], onDelete: Cascade)
+  label          Label        @relation(fields: [organizationId, labelId], references: [organizationId, id], onDelete: Cascade)
 
-  @@id([taskId, labelId])
+  @@id([organizationId, taskId, labelId])
 }
 
 model TaskDependency {
@@ -415,6 +425,7 @@ model Objective {
 
   @@index([projectId, status])
   @@unique([projectId, title])
+  @@unique([projectId, id])
 }
 
 model Department {
@@ -428,6 +439,7 @@ model Department {
   teams          Team[]
 
   @@unique([organizationId, name])
+  @@unique([organizationId, id])
   @@index([organizationId, createdAt])
 }
 
@@ -440,22 +452,23 @@ model Team {
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  department     Department?  @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  department     Department?  @relation(fields: [organizationId, departmentId], references: [organizationId, id], onDelete: Restrict)
   members        TeamMember[]
 
   @@unique([organizationId, name])
+  @@unique([organizationId, id])
   @@index([organizationId, departmentId])
 }
 
 model TeamMember {
-  teamId       String     @db.Uuid
-  membershipId String     @db.Uuid
-  joinedAt     DateTime   @default(now())
-  team         Team       @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  membership   Membership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+  organizationId String      @db.Uuid
+  teamId         String      @db.Uuid
+  membershipId   String      @db.Uuid
+  joinedAt       DateTime    @default(now())
+  team           Team        @relation(fields: [organizationId, teamId], references: [organizationId, id], onDelete: Cascade)
+  membership     Membership   @relation(fields: [organizationId, membershipId], references: [organizationId, id], onDelete: Cascade)
 
-  @@id([teamId, membershipId])
-  @@index([membershipId])
+  @@id([organizationId, teamId, membershipId])
 }
 
 model OrganizationSettings {

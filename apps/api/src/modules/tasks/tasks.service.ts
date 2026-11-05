@@ -16,7 +16,7 @@ export class TasksService {
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(SessionService) private readonly sessions: SessionService,
     @Inject(AuthorizationService) private readonly authorization: AuthorizationService,
-  ) {}
+  ) { }
 
   private async requirePermission(
     organizationId: string,
@@ -44,7 +44,11 @@ export class TasksService {
   ): Promise<void> {
     if (dto.parentTaskId) {
       const parent = await this.prisma.task.findFirst({
-        where: { id: dto.parentTaskId, projectId },
+        where: {
+          id: dto.parentTaskId,
+          organizationId,
+          projectId,
+        },
         select: { id: true },
       });
       if (!parent) throw new NotFoundException('Tarea padre no encontrada');
@@ -85,7 +89,11 @@ export class TasksService {
         throw new ConflictException('La lista de dependencias contiene duplicados');
       }
       const dependencies = await this.prisma.task.findMany({
-        where: { id: { in: dependsOnIds }, projectId },
+        where: {
+          id: { in: dependsOnIds },
+          organizationId,
+          projectId,
+        },
         select: { id: true },
       });
       if (dependencies.length !== dependsOnIds.length) {
@@ -137,9 +145,6 @@ export class TasksService {
       PERMISSIONS.RESOURCE_CREATE,
     );
     await this.projectInOrganization(userId, organizationId, projectId, PERMISSIONS.RESOURCE_CREATE);
-    if (dto.parentTaskId === undefined && dto.dependsOnIds?.includes(dto.parentTaskId ?? '')) {
-      throw new ConflictException('Una tarea no puede depender de sí misma');
-    }
     await this.validateRelations(organizationId, projectId, dto);
     await this.ensureNoDependencyCycle(projectId, dto.dependsOnIds ?? []);
     await this.ensureAssignmentCapacity(organizationId, projectId, {
@@ -151,6 +156,7 @@ export class TasksService {
     const task = await this.prisma.$transaction(async (transaction) => {
       const created = await transaction.task.create({
         data: {
+          organizationId,
           projectId,
           parentTaskId: dto.parentTaskId,
           assigneeId: dto.assigneeId,
@@ -162,13 +168,21 @@ export class TasksService {
           startsAt: dto.startsAt ? new Date(dto.startsAt) : null,
           estimatedHours: dto.estimatedHours,
           labels: {
-            create: (dto.labelIds ?? []).map((labelId) => ({ labelId })),
+            create: (dto.labelIds ?? []).map((labelId) => ({
+              organizationId,
+              labelId,
+            })),
           },
           dependencies: {
-            create: (dto.dependsOnIds ?? []).map((dependsOnId) => ({ dependsOnId })),
+            create: (dto.dependsOnIds ?? []).map((dependsOnId) => ({
+              dependsOnId,
+            })),
           },
           collaborators: {
-            create: (dto.collaboratorIds ?? []).map((membershipId) => ({ membershipId })),
+            create: (dto.collaboratorIds ?? []).map((membershipId) => ({
+              organizationId,
+              membershipId,
+            })),
           },
         },
         include: this.taskInclude(),
@@ -205,17 +219,17 @@ export class TasksService {
       labels: query.labelId ? { some: { labelId: query.labelId } } : undefined,
       OR: query.search
         ? [
-            { title: { contains: query.search.trim(), mode: 'insensitive' } },
-            { description: { contains: query.search.trim(), mode: 'insensitive' } },
-          ]
+          { title: { contains: query.search.trim(), mode: 'insensitive' } },
+          { description: { contains: query.search.trim(), mode: 'insensitive' } },
+        ]
         : undefined,
     };
     const skip = (query.page - 1) * query.pageSize;
     const [items, total] = await this.prisma.$transaction([
       this.prisma.task.findMany({
-      where,
-      include: this.taskInclude(),
-      orderBy: [{ status: 'asc' }, { priority: 'desc' }, { dueAt: 'asc' }],
+        where,
+        include: this.taskInclude(),
+        orderBy: [{ status: 'asc' }, { priority: 'desc' }, { dueAt: 'asc' }],
         skip,
         take: query.pageSize,
       }),
@@ -360,7 +374,12 @@ export class TasksService {
     });
     const updated = await this.prisma.$transaction(async (transaction) => {
       const previous = await transaction.task.findUniqueOrThrow({
-        where: { id: taskId },
+        where: {
+          organizationId_id: {
+            organizationId,
+            id: taskId,
+          },
+        },
         select: {
           title: true,
           description: true,
@@ -389,21 +408,27 @@ export class TasksService {
           estimatedHours: dto.estimatedHours === undefined ? previous.estimatedHours : dto.estimatedHours,
           labels: dto.labelIds
             ? {
-                deleteMany: {},
-                create: dto.labelIds.map((labelId) => ({ labelId })),
-              }
+              deleteMany: {},
+              create: dto.labelIds.map((labelId) => ({
+                organizationId,
+                labelId,
+              })),
+            }
             : undefined,
           dependencies: dto.dependsOnIds
             ? {
-                deleteMany: {},
-                create: dto.dependsOnIds.map((dependsOnId) => ({ dependsOnId })),
-              }
+              deleteMany: {},
+              create: dto.dependsOnIds.map((dependsOnId) => ({ dependsOnId })),
+            }
             : undefined,
           collaborators: dto.collaboratorIds
             ? {
-                deleteMany: {},
-                create: dto.collaboratorIds.map((membershipId) => ({ membershipId })),
-              }
+              deleteMany: {},
+              create: dto.collaboratorIds.map((membershipId) => ({
+                organizationId,
+                membershipId,
+              })),
+            }
             : undefined,
         },
         include: this.taskInclude(),
@@ -427,6 +452,7 @@ export class TasksService {
         });
         await transaction.taskHistory.createMany({
           data: changes.map(([field, oldValue, newValue]) => ({
+            organizationId,
             taskId,
             actorId: actorMembership.id,
             field: String(field),
@@ -509,15 +535,15 @@ export class TasksService {
       configuration.workingHours ?? organizationSettings?.workingHours,
     );
     const tasks = await this.prisma.task.findMany({
-        where: { projectId },
-        select: {
-          id: true,
-          assigneeId: true,
-          startsAt: true,
-          dueAt: true,
-          estimatedHours: true,
-          dependencies: { select: { dependsOnId: true } },
-        },
+      where: { projectId },
+      select: {
+        id: true,
+        assigneeId: true,
+        startsAt: true,
+        dueAt: true,
+        estimatedHours: true,
+        dependencies: { select: { dependsOnId: true } },
+      },
     });
     const byId = new Map(tasks.map((task) => [task.id, task]));
     const pending = new Set(tasks.map((task) => task.id));
@@ -525,49 +551,63 @@ export class TasksService {
     while (pending.size && changed) {
       changed = false;
       for (const taskId of [...pending]) {
-          const task = byId.get(taskId);
-          if (!task) {
-            pending.delete(taskId);
-            continue;
-          }
-          const dependencies = task.dependencies
-            .map(({ dependsOnId }) => byId.get(dependsOnId))
-            .filter((dependency): dependency is NonNullable<typeof dependency> => Boolean(dependency));
-          if (dependencies.some((dependency) => !dependency.dueAt)) continue;
-          if (!dependencies.length) {
-            pending.delete(taskId);
-            continue;
-          }
-          const dependencyDue = new Date(Math.max(...dependencies.map((dependency) => dependency.dueAt!.getTime())));
-          const start = this.nextWorkingTime(dependencyDue, schedule);
-          const durationHours = Math.max(1, Number(task.estimatedHours ?? 1));
-          const due = this.addWorkingHours(start, durationHours, schedule);
-          if (task.startsAt?.getTime() !== start.getTime() || task.dueAt?.getTime() !== due.getTime()) {
-            await this.ensureAssignmentCapacity(organizationId, projectId, {
-              taskId: task.id,
-              assigneeId: task.assigneeId ?? undefined,
-              startsAt: start,
-              dueAt: due,
-              estimatedHours: Number(task.estimatedHours ?? 0),
-            });
-            const oldStartsAt = task.startsAt?.toISOString();
-            const oldDueAt = task.dueAt?.toISOString();
-            const actorMembershipId = await this.membershipId(actorId, organizationId);
-            const updated = await this.prisma.task.update({
-              where: { id: task.id },
-              data: { startsAt: start, dueAt: due },
-            });
-            task.startsAt = updated.startsAt;
-            task.dueAt = updated.dueAt;
-            await this.prisma.taskHistory.createMany({
-              data: [
-                { taskId: task.id, actorId: actorMembershipId, field: 'startsAt', oldValue: oldStartsAt, newValue: start.toISOString() },
-                { taskId: task.id, actorId: actorMembershipId, field: 'dueAt', oldValue: oldDueAt, newValue: due.toISOString() },
-              ],
-            });
-          }
+        const task = byId.get(taskId);
+        if (!task) {
           pending.delete(taskId);
-          changed = true;
+          continue;
+        }
+        const dependencies = task.dependencies
+          .map(({ dependsOnId }) => byId.get(dependsOnId))
+          .filter((dependency): dependency is NonNullable<typeof dependency> => Boolean(dependency));
+        if (dependencies.some((dependency) => !dependency.dueAt)) continue;
+        if (!dependencies.length) {
+          pending.delete(taskId);
+          continue;
+        }
+        const dependencyDue = new Date(Math.max(...dependencies.map((dependency) => dependency.dueAt!.getTime())));
+        const start = this.nextWorkingTime(dependencyDue, schedule);
+        const durationHours = Math.max(1, Number(task.estimatedHours ?? 1));
+        const due = this.addWorkingHours(start, durationHours, schedule);
+        if (task.startsAt?.getTime() !== start.getTime() || task.dueAt?.getTime() !== due.getTime()) {
+          await this.ensureAssignmentCapacity(organizationId, projectId, {
+            taskId: task.id,
+            assigneeId: task.assigneeId ?? undefined,
+            startsAt: start,
+            dueAt: due,
+            estimatedHours: Number(task.estimatedHours ?? 0),
+          });
+          const oldStartsAt = task.startsAt?.toISOString();
+          const oldDueAt = task.dueAt?.toISOString();
+          const actorMembershipId = await this.membershipId(actorId, organizationId);
+          const updated = await this.prisma.task.update({
+            where: { id: task.id },
+            data: { startsAt: start, dueAt: due },
+          });
+          task.startsAt = updated.startsAt;
+          task.dueAt = updated.dueAt;
+          await this.prisma.taskHistory.createMany({
+            data: [
+              {
+                organizationId,
+                taskId: task.id,
+                actorId: actorMembershipId,
+                field: 'startsAt',
+                oldValue: oldStartsAt,
+                newValue: start.toISOString(),
+              },
+              {
+                organizationId,
+                taskId: task.id,
+                actorId: actorMembershipId,
+                field: 'dueAt',
+                oldValue: oldDueAt,
+                newValue: due.toISOString(),
+              },
+            ],
+          });
+        }
+        pending.delete(taskId);
+        changed = true;
       }
     }
   }
@@ -707,8 +747,8 @@ export class TasksService {
     const available = Math.max(
       0,
       totalDays * dailyHours
-        - absences.reduce((sum, absence) => sum + this.overlapWorkingDays(absence.startsAt, absence.endsAt, input.startsAt!, input.dueAt!, days) * dailyHours, 0)
-        + adjustments.reduce((sum, adjustment) => sum + (adjustment.type === 'INCREASE' ? Number(adjustment.hours) : -Number(adjustment.hours)), 0),
+      - absences.reduce((sum, absence) => sum + this.overlapWorkingDays(absence.startsAt, absence.endsAt, input.startsAt!, input.dueAt!, days) * dailyHours, 0)
+      + adjustments.reduce((sum, adjustment) => sum + (adjustment.type === 'INCREASE' ? Number(adjustment.hours) : -Number(adjustment.hours)), 0),
     );
     const assigned = existing.reduce((sum, task) => {
       if (!task.startsAt || !task.dueAt) return sum;
@@ -731,17 +771,77 @@ export class TasksService {
     return Math.max(0, ((Number(end[1]) * 60 + Number(end[2])) - (Number(start[1]) * 60 + Number(start[2]))) / 60);
   }
 
-  private workingDaysBetween(start: Date, end: Date, days: number[]): number {
-    let total = 0;
-    const cursor = new Date(start);
-    cursor.setHours(0, 0, 0, 0);
-    const last = new Date(end);
-    last.setHours(0, 0, 0, 0);
+  private startOfUtcDay(value: Date): Date {
+    return new Date(Date.UTC(
+      value.getUTCFullYear(),
+      value.getUTCMonth(),
+      value.getUTCDate(),
+    ));
+  }
+
+  private eachUtcDay(start: Date, end: Date): Date[] {
+    const dates: Date[] = [];
+    const cursor = this.startOfUtcDay(start);
+    const last = this.startOfUtcDay(end);
+
     while (cursor <= last) {
-      if (days.includes(cursor.getDay() || 7)) total += 1;
-      cursor.setDate(cursor.getDate() + 1);
+      dates.push(new Date(cursor));
+      cursor.setUTCDate(cursor.getUTCDate() + 1);
     }
-    return total;
+
+    return dates;
+  }
+
+  private workingDaysBetween(
+    start: Date,
+    end: Date,
+    days: number[],
+  ): number {
+    if (end < start) return 0;
+
+    return this.eachUtcDay(start, end).filter((date) =>
+      days.includes(date.getUTCDay() || 7),
+    ).length;
+  }
+
+  private taskHoursOnDay(
+    task: {
+      startsAt: Date | null;
+      dueAt: Date | null;
+    },
+    date: Date,
+    estimatedHours: number,
+    workingDays: number[],
+  ): number {
+    if (
+      !task.startsAt ||
+      !task.dueAt ||
+      estimatedHours <= 0
+    ) {
+      return 0;
+    }
+
+    const start = this.startOfUtcDay(task.startsAt);
+    const end = this.startOfUtcDay(task.dueAt);
+
+    if (end < start || date < start || date > end) {
+      return 0;
+    }
+
+    const totalWorkingDays = this.workingDaysBetween(
+      start,
+      end,
+      workingDays,
+    );
+
+    if (
+      totalWorkingDays === 0 ||
+      !workingDays.includes(date.getUTCDay() || 7)
+    ) {
+      return 0;
+    }
+
+    return estimatedHours / totalWorkingDays;
   }
 
   private overlapWorkingDays(start: Date, end: Date, rangeStart: Date, rangeEnd: Date, days: number[]): number {
