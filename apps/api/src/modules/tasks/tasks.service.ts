@@ -247,35 +247,58 @@ export class TasksService {
         dueAt: true,
         estimatedHours: true,
         dependencies: { select: { dependsOnId: true } },
-        collaborators: { select: { membershipId: true } },
-        dependencies: { select: { dependsOnId: true } },
       },
     });
     const durations = new Map(tasks.map((task) => [task.id, Math.max(1, Number(task.estimatedHours ?? 1))]));
-    const finish = new Map<string, number>();
+    const earliestStart = new Map<string, number>();
+    const earliestFinish = new Map<string, number>();
+    const successors = new Map<string, string[]>();
     const visiting = new Set<string>();
-    const critical = new Set<string>();
+    const topological: string[] = [];
+    for (const task of tasks) {
+      for (const dependency of task.dependencies) {
+        successors.set(dependency.dependsOnId, [
+          ...(successors.get(dependency.dependsOnId) ?? []),
+          task.id,
+        ]);
+      }
+    }
     const calculate = (taskId: string): number => {
-      if (finish.has(taskId)) return finish.get(taskId)!;
-      if (visiting.has(taskId)) return 0;
+      if (earliestFinish.has(taskId)) return earliestFinish.get(taskId)!;
+      if (visiting.has(taskId)) throw new ConflictException('El proyecto contiene una dependencia circular');
       visiting.add(taskId);
       const task = tasks.find((item) => item.id === taskId);
-      const dependencyFinish = Math.max(0, ...(task?.dependencies.map((edge) => calculate(edge.dependsOnId)) ?? []));
-      const value = dependencyFinish + (durations.get(taskId) ?? 1);
+      const start = Math.max(
+        0,
+        ...(task?.dependencies.map((edge) => calculate(edge.dependsOnId)) ?? []),
+      );
+      earliestStart.set(taskId, start);
+      const finish = start + (durations.get(taskId) ?? 1);
+      earliestFinish.set(taskId, finish);
       visiting.delete(taskId);
-      finish.set(taskId, value);
-      return value;
+      topological.push(taskId);
+      return finish;
     };
     for (const task of tasks) calculate(task.id);
-    const projectDuration = Math.max(0, ...finish.values());
-    for (const task of tasks) {
-      if ((finish.get(task.id) ?? 0) >= projectDuration && projectDuration > 0) critical.add(task.id);
+    const projectDuration = Math.max(0, ...earliestFinish.values());
+    const latestFinish = new Map<string, number>();
+    const latestStart = new Map<string, number>();
+    for (const taskId of [...topological].reverse()) {
+      const next = successors.get(taskId) ?? [];
+      const finish = next.length
+        ? Math.min(...next.map((successorId) => latestStart.get(successorId) ?? projectDuration))
+        : projectDuration;
+      latestFinish.set(taskId, finish);
+      latestStart.set(taskId, finish - (durations.get(taskId) ?? 1));
     }
+    const critical = topological.filter((taskId) =>
+      Math.abs((latestStart.get(taskId) ?? 0) - (earliestStart.get(taskId) ?? 0)) < 0.0001,
+    );
     return {
       projectId,
       tasks,
       blockedTaskIds: tasks.filter((task) => task.status === 'BLOCKED').map((task) => task.id),
-      criticalPathTaskIds: [...critical],
+      criticalPathTaskIds: critical,
       projectDurationHours: projectDuration,
     };
   }
@@ -311,7 +334,16 @@ export class TasksService {
     await this.projectInOrganization(userId, organizationId, projectId, projectPermission);
     const task = await this.prisma.task.findFirst({
       where: { id: taskId, projectId },
-      select: { id: true },
+      select: {
+        id: true,
+        description: true,
+        assigneeId: true,
+        startsAt: true,
+        dueAt: true,
+        estimatedHours: true,
+        dependencies: { select: { dependsOnId: true } },
+        collaborators: { select: { membershipId: true } },
+      },
     });
     if (!task) throw new NotFoundException('Tarea no encontrada');
     if (dto.parentTaskId === taskId || dto.dependsOnIds?.includes(taskId)) {
@@ -321,10 +353,10 @@ export class TasksService {
     await this.ensureNoDependencyCycle(projectId, dto.dependsOnIds ?? [], taskId);
     await this.ensureAssignmentCapacity(organizationId, projectId, {
       taskId,
-      assigneeId: dto.assigneeId,
-      startsAt: dto.startsAt ? new Date(dto.startsAt) : null,
-      dueAt: dto.dueAt ? new Date(dto.dueAt) : null,
-      estimatedHours: dto.estimatedHours,
+      assigneeId: dto.assigneeId !== undefined ? dto.assigneeId : task.assigneeId ?? undefined,
+      startsAt: dto.startsAt !== undefined ? new Date(dto.startsAt) : task.startsAt,
+      dueAt: dto.dueAt !== undefined ? new Date(dto.dueAt) : task.dueAt,
+      estimatedHours: dto.estimatedHours !== undefined ? dto.estimatedHours : Number(task.estimatedHours ?? 0),
     });
     const updated = await this.prisma.$transaction(async (transaction) => {
       const previous = await transaction.task.findUniqueOrThrow({
@@ -332,26 +364,29 @@ export class TasksService {
         select: {
           title: true,
           description: true,
+          parentTaskId: true,
           status: true,
           assigneeId: true,
           priority: true,
           startsAt: true,
           dueAt: true,
           estimatedHours: true,
+          dependencies: { select: { dependsOnId: true } },
+          collaborators: { select: { membershipId: true } },
         },
       });
       const updated = await transaction.task.update({
         where: { id: taskId },
         data: {
-          parentTaskId: dto.parentTaskId,
-          assigneeId: dto.assigneeId,
+          parentTaskId: dto.parentTaskId === undefined ? previous.parentTaskId : dto.parentTaskId,
+          assigneeId: dto.assigneeId === undefined ? previous.assigneeId : dto.assigneeId,
           title: dto.title.trim(),
-          description: dto.description?.trim() || null,
+          description: dto.description === undefined ? previous.description : dto.description.trim() || null,
           status: dto.status,
           priority: dto.priority,
-          dueAt: dto.dueAt ? new Date(dto.dueAt) : null,
-          startsAt: dto.startsAt ? new Date(dto.startsAt) : null,
-          estimatedHours: dto.estimatedHours,
+          dueAt: dto.dueAt === undefined ? previous.dueAt : new Date(dto.dueAt),
+          startsAt: dto.startsAt === undefined ? previous.startsAt : new Date(dto.startsAt),
+          estimatedHours: dto.estimatedHours === undefined ? previous.estimatedHours : dto.estimatedHours,
           labels: dto.labelIds
             ? {
                 deleteMany: {},
@@ -459,13 +494,25 @@ export class TasksService {
   ): Promise<void> {
     const project = await this.prisma.project.findFirst({
       where: { id: projectId, organizationId },
-      select: { delayPolicy: true },
+      select: { delayPolicy: true, configuration: true },
     });
     if (project?.delayPolicy !== 'AUTO_RESCHEDULE') return;
+    const organizationSettings = await this.prisma.organizationSettings.findUnique({
+      where: { organizationId },
+      select: { workingDays: true, workingHours: true },
+    });
+    const configuration = project.configuration && typeof project.configuration === 'object'
+      ? project.configuration as { workingDays?: unknown; workingHours?: unknown }
+      : {};
+    const schedule = this.schedule(
+      configuration.workingDays ?? organizationSettings?.workingDays,
+      configuration.workingHours ?? organizationSettings?.workingHours,
+    );
     const tasks = await this.prisma.task.findMany({
         where: { projectId },
         select: {
           id: true,
+          assigneeId: true,
           startsAt: true,
           dueAt: true,
           estimatedHours: true,
@@ -491,10 +538,18 @@ export class TasksService {
             pending.delete(taskId);
             continue;
           }
-          const start = new Date(Math.max(...dependencies.map((dependency) => dependency.dueAt!.getTime())));
+          const dependencyDue = new Date(Math.max(...dependencies.map((dependency) => dependency.dueAt!.getTime())));
+          const start = this.nextWorkingTime(dependencyDue, schedule);
           const durationHours = Math.max(1, Number(task.estimatedHours ?? 1));
-          const due = new Date(start.getTime() + durationHours * 60 * 60 * 1000);
+          const due = this.addWorkingHours(start, durationHours, schedule);
           if (task.startsAt?.getTime() !== start.getTime() || task.dueAt?.getTime() !== due.getTime()) {
+            await this.ensureAssignmentCapacity(organizationId, projectId, {
+              taskId: task.id,
+              assigneeId: task.assigneeId ?? undefined,
+              startsAt: start,
+              dueAt: due,
+              estimatedHours: Number(task.estimatedHours ?? 0),
+            });
             const oldStartsAt = task.startsAt?.toISOString();
             const oldDueAt = task.dueAt?.toISOString();
             const actorMembershipId = await this.membershipId(actorId, organizationId);
@@ -525,6 +580,72 @@ export class TasksService {
     return membership.id;
   }
 
+  private schedule(daysValue: unknown, hoursValue: unknown) {
+    const days = Array.isArray(daysValue) && daysValue.every((day) => Number.isInteger(day))
+      ? daysValue as number[]
+      : [1, 2, 3, 4, 5];
+    const hours = hoursValue && typeof hoursValue === 'object'
+      ? hoursValue as { start?: string; end?: string }
+      : {};
+    const parse = (value: string | undefined, fallback: number) => {
+      const match = value?.match(/^([01]\d|2[0-3]):([0-5]\d)$/);
+      return match ? Number(match[1]) * 60 + Number(match[2]) : fallback;
+    };
+    const startMinutes = parse(hours.start, 9 * 60);
+    const endMinutes = parse(hours.end, 17 * 60);
+    return {
+      days,
+      startMinutes,
+      endMinutes: Math.max(startMinutes + 1, endMinutes),
+    };
+  }
+
+  private nextWorkingTime(value: Date, schedule: {
+    days: number[];
+    startMinutes: number;
+    endMinutes: number;
+  }): Date {
+    const result = new Date(value);
+    for (let attempts = 0; attempts < 370; attempts += 1) {
+      const day = result.getDay() || 7;
+      const minutes = result.getHours() * 60 + result.getMinutes();
+      if (schedule.days.includes(day) && minutes < schedule.endMinutes) {
+        if (minutes < schedule.startMinutes) result.setHours(
+          Math.floor(schedule.startMinutes / 60),
+          schedule.startMinutes % 60,
+          0,
+          0,
+        );
+        return result;
+      }
+      result.setDate(result.getDate() + 1);
+      result.setHours(Math.floor(schedule.startMinutes / 60), schedule.startMinutes % 60, 0, 0);
+    }
+    throw new ConflictException('No existe una jornada laboral válida para reprogramar la tarea');
+  }
+
+  private addWorkingHours(
+    start: Date,
+    hours: number,
+    schedule: { days: number[]; startMinutes: number; endMinutes: number },
+  ): Date {
+    let remaining = hours;
+    let cursor = this.nextWorkingTime(start, schedule);
+    for (let attempts = 0; attempts < 370 && remaining > 0; attempts += 1) {
+      const available = (schedule.endMinutes - (cursor.getHours() * 60 + cursor.getMinutes())) / 60;
+      const consumed = Math.min(available, remaining);
+      cursor = new Date(cursor.getTime() + consumed * 60 * 60 * 1000);
+      remaining -= consumed;
+      if (remaining > 0) {
+        cursor.setDate(cursor.getDate() + 1);
+        cursor.setHours(Math.floor(schedule.startMinutes / 60), schedule.startMinutes % 60, 0, 0);
+        cursor = this.nextWorkingTime(cursor, schedule);
+      }
+    }
+    if (remaining > 0) throw new ConflictException('La duración excede el calendario laboral disponible');
+    return cursor;
+  }
+
   private async ensureAssignmentCapacity(
     organizationId: string,
     projectId: string,
@@ -541,9 +662,19 @@ export class TasksService {
       where: { id: projectId, organizationId },
       select: { configuration: true },
     });
-    const configuration = project?.configuration && typeof project.configuration === 'object'
+    let configuration = project?.configuration && typeof project.configuration === 'object'
       ? project.configuration as { workingDays?: unknown; workingHours?: unknown }
       : {};
+    if (!project?.configuration) {
+      const settings = await this.prisma.organizationSettings.findUnique({
+        where: { organizationId },
+        select: { workingDays: true, workingHours: true },
+      });
+      configuration = {
+        workingDays: settings?.workingDays,
+        workingHours: settings?.workingHours,
+      };
+    }
     const days = Array.isArray(configuration.workingDays)
       ? configuration.workingDays.filter((day): day is number => typeof day === 'number')
       : [1, 2, 3, 4, 5];

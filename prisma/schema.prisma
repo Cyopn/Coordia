@@ -124,7 +124,7 @@ model WorkCapacityAdjustment {
   reason       String?
   createdAt    DateTime @default(now())
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  membership   Membership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+  membership     Membership     @relation(fields: [organizationId, membershipId], references: [organizationId, id], onDelete: Cascade)
 
   @@unique([membershipId, date])
   @@index([organizationId, date])
@@ -140,7 +140,7 @@ model WorkAbsence {
   reason         String?
   createdAt      DateTime    @default(now())
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  membership     Membership   @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+  membership     Membership   @relation(fields: [organizationId, membershipId], references: [organizationId, id], onDelete: Cascade)
 
   @@index([organizationId, startsAt, endsAt])
   @@index([membershipId, startsAt, endsAt])
@@ -496,6 +496,7 @@ model Membership {
   absences WorkAbsence[]
 
   @@unique([userId, organizationId])
+  @@unique([organizationId, id])
   @@index([organizationId, status])
 }
 

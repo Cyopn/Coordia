@@ -241,6 +241,10 @@ legend {
   background: #b42318;
 }
 
+.gantt-bar.critical {
+  box-shadow: 0 0 0 2px #f79009;
+}
+
 .gantt-label {
   border: 0;
   padding: 0;

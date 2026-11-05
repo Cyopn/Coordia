@@ -27,6 +27,8 @@ type TaskResponse = {
   pageSize: number;
   totalPages: number;
 };
+type TimelineTask = Pick<Task, 'id' | 'title' | 'status' | 'startsAt' | 'dueAt' | 'dependencies'>;
+type PlanningResponse = { tasks: TimelineTask[]; criticalPathTaskIds: string[] };
 
 const statuses = ['TODO', 'IN_PROGRESS', 'BLOCKED', 'DONE', 'CANCELLED'];
 const priorities = ['LOW', 'MEDIUM', 'HIGH', 'URGENT'];
@@ -38,6 +40,7 @@ export function Workspace() {
   const [projectId, setProjectId] = useState('');
   const [labels, setLabels] = useState<Label[]>([]);
   const [tasks, setTasks] = useState<TaskResponse | null>(null);
+  const [planning, setPlanning] = useState<PlanningResponse | null>(null);
   const [status, setStatus] = useState('');
   const [priority, setPriority] = useState('');
   const [search, setSearch] = useState('');
@@ -97,14 +100,20 @@ export function Workspace() {
 
   async function loadTasks() {
     try {
-      const params = new URLSearchParams({ page: '1', pageSize: '25' });
+      const params = new URLSearchParams({ page: '1', pageSize: '100' });
       if (status) params.set('status', status);
       if (priority) params.set('priority', priority);
       if (search.trim()) params.set('search', search.trim());
-      const result = await apiRequest<TaskResponse>(
-        `/organizations/${organizationId}/projects/${projectId}/tasks?${params.toString()}`,
-      );
+      const [result, planningResult] = await Promise.all([
+        apiRequest<TaskResponse>(
+          `/organizations/${organizationId}/projects/${projectId}/tasks?${params.toString()}`,
+        ),
+        apiRequest<PlanningResponse>(
+          `/organizations/${organizationId}/projects/${projectId}/planning`,
+        ),
+      ]);
       setTasks(result);
+      setPlanning(planningResult);
     } catch (requestError) {
       setError(getError(requestError));
     }
@@ -339,13 +348,23 @@ export function Workspace() {
           </div>
         ) : viewMode === 'calendar' ? (
           <CalendarView
-            tasks={tasks?.items ?? []}
+            tasks={planning?.tasks ?? tasks?.items ?? []}
             date={calendarDate}
             onChange={setCalendarDate}
-            onEdit={beginEdit}
+            onEdit={(timelineTask) => {
+              const fullTask = tasks?.items.find((task) => task.id === timelineTask.id);
+              if (fullTask) beginEdit(fullTask);
+            }}
           />
         ) : viewMode === 'gantt' ? (
-          <GanttView tasks={tasks?.items ?? []} onEdit={beginEdit} />
+          <GanttView
+            tasks={planning?.tasks ?? tasks?.items ?? []}
+            criticalPathTaskIds={planning?.criticalPathTaskIds ?? []}
+            onEdit={(timelineTask) => {
+              const fullTask = tasks?.items.find((task) => task.id === timelineTask.id);
+              if (fullTask) beginEdit(fullTask);
+            }}
+          />
         ) : (
         <div className="task-list">
           {tasks?.items.map((task) => (
@@ -380,10 +399,10 @@ function CalendarView({
   onChange,
   onEdit,
 }: {
-  tasks: Task[];
+  tasks: TimelineTask[];
   date: Date;
   onChange: (date: Date) => void;
-  onEdit: (task: Task) => void;
+  onEdit: (task: TimelineTask) => void;
 }) {
   const year = date.getFullYear();
   const month = date.getMonth();
@@ -415,7 +434,15 @@ function CalendarView({
   );
 }
 
-function GanttView({ tasks, onEdit }: { tasks: Task[]; onEdit: (task: Task) => void }) {
+function GanttView({
+  tasks,
+  criticalPathTaskIds,
+  onEdit,
+}: {
+  tasks: TimelineTask[];
+  criticalPathTaskIds: string[];
+  onEdit: (task: TimelineTask) => void;
+}) {
   const dated = tasks.filter((task) => task.startsAt || task.dueAt);
   if (!dated.length) return <p>Asigna fechas de inicio y vencimiento para visualizar el Gantt.</p>;
   const start = new Date(Math.min(...dated.map((task) => new Date(task.startsAt ?? task.dueAt!).getTime())));
@@ -433,7 +460,7 @@ function GanttView({ tasks, onEdit }: { tasks: Task[]; onEdit: (task: Task) => v
           <article className="task-card" key={task.id}>
             <button type="button" className="gantt-label" onClick={() => onEdit(task)}>{task.title}</button>
             <div className="gantt-track">
-              <span className={`gantt-bar ${task.status === 'BLOCKED' ? 'blocked' : ''}`} style={{ left: `${left}%`, width: `${width}%` }} />
+              <span className={`gantt-bar ${task.status === 'BLOCKED' ? 'blocked' : ''} ${criticalPathTaskIds.includes(task.id) ? 'critical' : ''}`} style={{ left: `${left}%`, width: `${width}%` }} />
             </div>
             <small>{new Date(taskStart).toLocaleDateString('es-MX')} - {new Date(taskEnd).toLocaleDateString('es-MX')}{task.dependencies.length ? ` · ${task.dependencies.length} predecesora(s)` : ''}</small>
           </article>

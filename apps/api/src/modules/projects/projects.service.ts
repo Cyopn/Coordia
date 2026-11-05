@@ -220,9 +220,24 @@ export class ProjectsService {
     const userId = await this.sessions.requireUser(request);
     await this.authorization.requirePermission(userId, organizationId, PERMISSIONS.PROJECT_READ);
     await this.projectInOrganization(userId, organizationId, projectId, PERMISSIONS.PROJECT_READ);
-    return this.prisma.objective.findMany({
+    const objectives = await this.prisma.objective.findMany({
       where: { projectId },
+      include: {
+        taskLinks: {
+          include: { task: { select: { status: true } } },
+        },
+      },
       orderBy: [{ status: 'asc' }, { dueAt: 'asc' }, { title: 'asc' }],
+    });
+    return objectives.map(({ taskLinks, ...objective }) => {
+      const total = taskLinks.length;
+      const completed = taskLinks.filter(({ task }) => task.status === 'DONE').length;
+      return {
+        ...objective,
+        progressPercent: total ? Math.round((completed / total) * 100) : 0,
+        linkedTaskCount: total,
+        completedTaskCount: completed,
+      };
     });
   }
 
