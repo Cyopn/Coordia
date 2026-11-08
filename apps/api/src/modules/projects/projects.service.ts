@@ -17,7 +17,7 @@ export class ProjectsService {
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(SessionService) private readonly sessions: SessionService,
     @Inject(AuthorizationService) private readonly authorization: AuthorizationService,
-  ) {}
+  ) { }
 
   private async userWithPermission(
     organizationId: string,
@@ -86,7 +86,11 @@ export class ProjectsService {
           select: { id: true },
         });
         await this.prisma.projectAccess.create({
-          data: { projectId: project.id, membershipId: membership.id },
+          data: {
+            organizationId,
+            projectId: project.id,
+            membershipId: membership.id,
+          },
         });
       }
       await this.audit(organizationId, userId, 'project.created', project.id);
@@ -160,8 +164,18 @@ export class ProjectsService {
           })
         ).id;
         await this.prisma.projectAccess.upsert({
-          where: { projectId_membershipId: { projectId, membershipId } },
-          create: { projectId, membershipId },
+          where: {
+            organizationId_projectId_membershipId: {
+              organizationId,
+              projectId,
+              membershipId,
+            },
+          },
+          create: {
+            organizationId,
+            projectId,
+            membershipId,
+          },
           update: {},
         });
       }
@@ -295,7 +309,11 @@ export class ProjectsService {
     ]);
     if (!objective || !task) throw new NotFoundException('Objetivo o tarea no encontrados');
     const link = await this.prisma.objectiveTask.create({
-      data: { objectiveId, taskId: dto.taskId },
+      data: {
+        projectId,
+        objectiveId,
+        taskId: dto.taskId,
+      },
     });
     await this.audit(organizationId, userId, 'objective.task_linked', dto.taskId);
     return link;
@@ -324,7 +342,13 @@ export class ProjectsService {
     });
     if (!objective || !task) throw new NotFoundException('Objetivo o tarea no encontrados');
     await this.prisma.objectiveTask.delete({
-      where: { objectiveId_taskId: { objectiveId, taskId } },
+      where: {
+        projectId_objectiveId_taskId: {
+          projectId,
+          objectiveId,
+          taskId,
+        },
+      },
     });
     await this.audit(organizationId, userId, 'objective.task_unlinked', taskId);
   }

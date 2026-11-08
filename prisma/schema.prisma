@@ -552,6 +552,7 @@ model Role {
   permissions    RolePermission[]
   memberships    MembershipRole[]
 
+  @@unique([organizationId, id])
   @@unique([organizationId, name])
   @@index([organizationId])
 }
@@ -580,7 +581,7 @@ model MembershipRole {
   role           Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
 
   @@id([organizationId, membershipId, roleId])
-  @@index([roleId])
+  @@index([organizationId, roleId])
 }
 
 model Session {

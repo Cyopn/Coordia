@@ -1,4 +1,5 @@
-import { IsArray, IsNumber, IsObject, IsOptional, IsString, Length, MaxLength } from 'class-validator';
+import { IsArray, IsInt, IsNumber, IsObject, IsOptional, IsString, Length, MaxLength, Min, ValidateNested } from 'class-validator';
+import { Type } from 'class-transformer';
 
 export class CreateTemplateWorkItemDto {
   @IsString()
@@ -22,11 +23,14 @@ export class CreateTemplateWorkItemDto {
   estimatedHours?: number;
 
   @IsOptional()
+  @IsInt()
+  @Min(0)
   parentIndex?: number;
 
   @IsOptional()
   @IsArray()
-  @IsNumber({}, { each: true })
+  @IsInt({ each: true })
+  @Min(0, { each: true })
   dependsOnIndexes?: number[];
 }
 
@@ -46,5 +50,7 @@ export class CreateTemplateDto {
 
   @IsOptional()
   @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => CreateTemplateWorkItemDto)
   items?: CreateTemplateWorkItemDto[];
 }

@@ -7,15 +7,7 @@ import {
 } from '@nestjs/common';
 import { InvitationStatus, MembershipStatus, Prisma } from '@prisma/client';
 import { Request } from 'express';
-const PERMISSIONS = {
-  MEMBERSHIP_INVITE: 'membership.invite',
-  MEMBERSHIP_REMOVE: 'membership.remove',
-} as const;
-
-const INITIAL_PERMISSION_CATALOG = Object.values(PERMISSIONS).map((key) => ({
-  key,
-  description: key,
-}));
+import { INITIAL_PERMISSION_CATALOG, PERMISSIONS } from '@coordia/shared';
 import { AuthorizationService } from '../../common/authorization/authorization.service';
 import { PrismaService } from '../../common/database/prisma.service';
 import { SessionService } from '../auth/session.service';

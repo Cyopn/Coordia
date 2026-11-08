@@ -1,5 +1,6 @@
-import { IsArray, IsObject, IsOptional, IsString, Length, MaxLength } from 'class-validator';
+import { IsArray, IsObject, IsOptional, IsString, Length, MaxLength, ValidateNested } from 'class-validator';
 import { CreateTemplateWorkItemDto } from './create-template.dto';
+import { Type } from 'class-transformer';
 
 export class UpdateTemplateDto {
   @IsString()
@@ -17,5 +18,7 @@ export class UpdateTemplateDto {
 
   @IsOptional()
   @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => CreateTemplateWorkItemDto)
   items?: CreateTemplateWorkItemDto[];
 }

@@ -76,6 +76,14 @@ export class WorkManagementService {
           configuration: dto.configuration as Prisma.InputJsonValue | undefined,
         },
       });
+
+      await this.lockProjectWorkItemContainer(
+        transaction,
+        organizationId,
+        'template',
+        created.id,
+      );
+
       const itemIds: string[] = [];
       for (const [index, item] of items.entries()) {
         const parentId = item.parentIndex === undefined ? undefined : itemIds[item.parentIndex];
@@ -107,6 +115,8 @@ export class WorkManagementService {
         }
       }
       return created;
+    }, {
+      isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
     });
     await this.audit(organizationId, userId, 'project_template.created', template.id);
     return this.prisma.projectTemplate.findUniqueOrThrow({
@@ -129,6 +139,12 @@ export class WorkManagementService {
         select: { id: true },
       });
       if (!template) throw new NotFoundException('Plantilla no encontrada');
+      await this.lockProjectWorkItemContainer(
+        transaction,
+        organizationId,
+        'template',
+        templateId,
+      );
       const result = await transaction.projectTemplate.update({
         where: { id: templateId },
         data: {
@@ -175,31 +191,117 @@ export class WorkManagementService {
         }
       }
       return result;
+    }, {
+      isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
     });
     await this.audit(organizationId, userId, 'project_template.updated', updated.id);
     return updated;
   }
 
-  async archiveTemplate(organizationId: string, templateId: string, request: Request) {
-    const userId = await this.authorized(organizationId, request, PERMISSIONS.TEMPLATE_MANAGE);
-    const template = await this.prisma.projectTemplate.updateMany({
-      where: { id: templateId, organizationId, status: 'ACTIVE' },
-      data: { status: 'ARCHIVED' },
-    });
-    if (!template.count) throw new NotFoundException('Plantilla no encontrada');
-    await this.audit(organizationId, userId, 'project_template.archived', templateId);
+  async archiveTemplate(
+    organizationId: string,
+    templateId: string,
+    request: Request,
+  ) {
+    const userId = await this.authorized(
+      organizationId,
+      request,
+      PERMISSIONS.TEMPLATE_MANAGE,
+    );
+
+    await this.prisma.$transaction(
+      async (transaction) => {
+        await this.lockProjectWorkItemContainer(
+          transaction,
+          organizationId,
+          'template',
+          templateId,
+        );
+
+        const template = await transaction.projectTemplate.updateMany({
+          where: {
+            id: templateId,
+            organizationId,
+            status: 'ACTIVE',
+          },
+          data: { status: 'ARCHIVED' },
+        });
+
+        if (!template.count) {
+          throw new NotFoundException('Plantilla no encontrada');
+        }
+      },
+      {
+        isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+      },
+    );
+
+    await this.audit(
+      organizationId,
+      userId,
+      'project_template.archived',
+      templateId,
+    );
   }
 
-  async deleteTemplate(organizationId: string, templateId: string, request: Request) {
-    const userId = await this.authorized(organizationId, request, PERMISSIONS.TEMPLATE_MANAGE);
-    const template = await this.prisma.projectTemplate.findFirst({
-      where: { id: templateId, organizationId },
-      select: { id: true, _count: { select: { projects: true } } },
-    });
-    if (!template) throw new NotFoundException('Plantilla no encontrada');
-    if (template._count.projects) throw new ForbiddenException('No se puede eliminar una plantilla usada por proyectos');
-    await this.prisma.projectTemplate.delete({ where: { id: templateId } });
-    await this.audit(organizationId, userId, 'project_template.deleted', templateId);
+  async deleteTemplate(
+    organizationId: string,
+    templateId: string,
+    request: Request,
+  ) {
+    const userId = await this.authorized(
+      organizationId,
+      request,
+      PERMISSIONS.TEMPLATE_MANAGE,
+    );
+
+    await this.prisma.$transaction(
+      async (transaction) => {
+        await this.lockProjectWorkItemContainer(
+          transaction,
+          organizationId,
+          'template',
+          templateId,
+        );
+
+        const template = await transaction.projectTemplate.findFirst({
+          where: {
+            id: templateId,
+            organizationId,
+          },
+          select: {
+            id: true,
+            _count: {
+              select: { projects: true },
+            },
+          },
+        });
+
+        if (!template) {
+          throw new NotFoundException('Plantilla no encontrada');
+        }
+
+        if (template._count.projects) {
+          throw new ForbiddenException(
+            'No se puede eliminar una plantilla usada por proyectos',
+          );
+        }
+
+        await transaction.projectTemplate.delete({
+          where: { id: templateId },
+        });
+      },
+      {
+        isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+      },
+    );
+
+    await this.audit(
+      organizationId,
+      userId,
+      'project_template.deleted',
+      templateId,
+    );
   }
 
   async createProjectFromTemplate(
@@ -209,11 +311,6 @@ export class WorkManagementService {
     request: Request,
   ) {
     const userId = await this.authorized(organizationId, request, PERMISSIONS.PROJECT_CREATE);
-    const template = await this.prisma.projectTemplate.findFirst({
-      where: { id: templateId, organizationId, status: 'ACTIVE' },
-      include: { workItems: { orderBy: { sortOrder: 'asc' } } },
-    });
-    if (!template) throw new NotFoundException('Plantilla no encontrada');
     const settings = await this.prisma.organizationSettings.findUnique({
       where: { organizationId },
       select: {
@@ -229,85 +326,141 @@ export class WorkManagementService {
       where: { userId_organizationId: { userId, organizationId } },
       select: { id: true },
     });
-    const configuration = {
-      taskStatuses: settings?.taskStatuses ?? ['TODO', 'IN_PROGRESS', 'BLOCKED', 'DONE', 'CANCELLED'],
-      taskPriorities: settings?.taskPriorities ?? ['LOW', 'MEDIUM', 'HIGH', 'URGENT'],
-      workRules: settings?.workRules ?? {},
-      workingHours: settings?.workingHours ?? { start: '09:00', end: '17:00' },
-      workingDays: settings?.workingDays ?? [1, 2, 3, 4, 5],
-      planning: settings?.planning ?? { delayPolicy: 'WARN' },
-      ...(template.configuration && typeof template.configuration === 'object'
-        ? template.configuration as Record<string, unknown>
-        : {}),
-    };
-    const project = await this.prisma.$transaction(async (transaction) => {
-      const created = await transaction.project.create({
-        data: {
+    const project = await this.prisma.$transaction(
+      async (transaction) => {
+        await this.lockProjectWorkItemContainer(
+          transaction,
           organizationId,
-          name: name.trim(),
-          ownerId: membership.id,
-          templateId: template.id,
-          configuration,
-        },
-      });
-      const ids = new Map<string, string>();
-      const taskIds = new Map<string, string>();
-      for (const item of this.orderTemplateItems(template.workItems)) {
-        const copy = await transaction.projectWorkItem.create({
-          data: {
+          'template',
+          templateId,
+        );
+
+        const template = await transaction.projectTemplate.findFirst({
+          where: {
+            id: templateId,
             organizationId,
-            projectId: created.id,
-            parentId: item.parentId ? ids.get(item.parentId) : undefined,
-            title: item.title,
-            type: item.type,
-            status: item.status,
-            priority: item.priority,
-            estimatedHours: item.estimatedHours,
-            sortOrder: item.sortOrder,
+            status: 'ACTIVE',
+          },
+          include: {
+            workItems: {
+              orderBy: { sortOrder: 'asc' },
+            },
           },
         });
-        ids.set(item.id, copy.id);
-        const status = Object.values(TaskStatus).includes(item.status as TaskStatus)
-          ? item.status as TaskStatus
-          : TaskStatus.TODO;
-        const priority = Object.values(TaskPriority).includes(item.priority as TaskPriority)
-          ? item.priority as TaskPriority
-          : TaskPriority.MEDIUM;
-        const task = await transaction.task.create({
+
+        if (!template) {
+          throw new NotFoundException('Plantilla no encontrada');
+        }
+        const templateDependencies =
+          this.validateStoredTemplateDependencies(template.workItems);
+
+        const configuration = {
+          taskStatuses: settings?.taskStatuses ?? ['TODO', 'IN_PROGRESS', 'BLOCKED', 'DONE', 'CANCELLED'],
+          taskPriorities: settings?.taskPriorities ?? ['LOW', 'MEDIUM', 'HIGH', 'URGENT'],
+          workRules: settings?.workRules ?? {},
+          workingHours: settings?.workingHours ?? { start: '09:00', end: '17:00' },
+          workingDays: settings?.workingDays ?? [1, 2, 3, 4, 5],
+          planning: settings?.planning ?? { delayPolicy: 'WARN' },
+          ...(template.configuration && typeof template.configuration === 'object'
+            ? template.configuration as Record<string, unknown>
+            : {}),
+        };
+
+        const created = await transaction.project.create({
           data: {
             organizationId,
-            projectId: created.id,
-            parentTaskId: item.parentId ? taskIds.get(item.parentId) : undefined,
-            title: item.title,
-            status,
-            priority,
-            estimatedHours: item.estimatedHours,
+            name: name.trim(),
+            ownerId: membership.id,
+            templateId: template.id,
+            configuration,
           },
         });
-        taskIds.set(item.id, task.id);
-      }
-      for (const item of template.workItems) {
-        const templateItem = item as typeof item & { dependsOnIds?: unknown };
-        const dependsOnIds = Array.isArray(templateItem.dependsOnIds) ? templateItem.dependsOnIds : [];
-        if (dependsOnIds.length) {
-          const dependencyTaskIds = dependsOnIds.map((sourceId) => taskIds.get(String(sourceId)));
-          if (dependencyTaskIds.some((dependencyId) => !dependencyId)) {
-            throw new ForbiddenException('La plantilla contiene una dependencia inexistente');
+
+        await this.lockProjectWorkItemContainer(
+          transaction,
+          organizationId,
+          'project',
+          created.id,
+        );
+
+        const ids = new Map<string, string>();
+        const taskIds = new Map<string, string>();
+        for (const item of this.orderTemplateItems(template.workItems)) {
+          const copy = await transaction.projectWorkItem.create({
+            data: {
+              organizationId,
+              projectId: created.id,
+              parentId: item.parentId ? ids.get(item.parentId) : undefined,
+              title: item.title,
+              type: item.type,
+              status: item.status,
+              priority: item.priority,
+              estimatedHours: item.estimatedHours,
+              sortOrder: item.sortOrder,
+            },
+          });
+          ids.set(item.id, copy.id);
+          const status = Object.values(TaskStatus).includes(item.status as TaskStatus)
+            ? item.status as TaskStatus
+            : TaskStatus.TODO;
+          const priority = Object.values(TaskPriority).includes(item.priority as TaskPriority)
+            ? item.priority as TaskPriority
+            : TaskPriority.MEDIUM;
+          const task = await transaction.task.create({
+            data: {
+              organizationId,
+              projectId: created.id,
+              parentTaskId: item.parentId ? taskIds.get(item.parentId) : undefined,
+              title: item.title,
+              status,
+              priority,
+              estimatedHours: item.estimatedHours,
+            },
+          });
+          taskIds.set(item.id, task.id);
+        }
+        for (const item of template.workItems) {
+          const dependencyIds = templateDependencies.get(item.id) ?? [];
+
+          if (!dependencyIds.length) continue;
+
+          const taskId = taskIds.get(item.id);
+          const dependencyTaskIds = dependencyIds.map(
+            (sourceId) => taskIds.get(sourceId),
+          );
+
+          const copiedDependencyIds = dependencyIds.map(
+            (sourceId) => ids.get(sourceId),
+          );
+
+          if (
+            !taskId ||
+            dependencyTaskIds.some((dependencyId) => !dependencyId) ||
+            copiedDependencyIds.some((dependencyId) => !dependencyId)
+          ) {
+            throw new ForbiddenException(
+              'No se pudieron resolver las dependencias de la plantilla',
+            );
           }
+
           await transaction.projectWorkItem.update({
             where: { id: ids.get(item.id)! },
-            data: { dependsOnIds: dependsOnIds.map((sourceId) => ids.get(String(sourceId))!) as Prisma.InputJsonValue } as unknown as Prisma.ProjectWorkItemUpdateInput,
+            data: {
+              dependsOnIds: copiedDependencyIds as Prisma.InputJsonValue,
+            } as unknown as Prisma.ProjectWorkItemUpdateInput,
           });
+
           await transaction.taskDependency.createMany({
             data: dependencyTaskIds.map((dependsOnId) => ({
               projectId: created.id,
-              taskId: taskIds.get(item.id)!,
+              taskId,
               dependsOnId: dependsOnId!,
             })),
           });
         }
-      }
-      return created;
+        return created
+      }, {
+      isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
     });
     await this.audit(organizationId, userId, 'project.created_from_template', project.id);
     return project;
@@ -638,26 +791,76 @@ export class WorkManagementService {
     return estimatedHours / totalWorkingDays;
   }
 
+  private async lockProjectWorkItemContainer(
+    transaction: Prisma.TransactionClient,
+    organizationId: string,
+    containerType: 'template' | 'project',
+    containerId: string,
+  ): Promise<void> {
+    const lockKey =
+      `org:${organizationId}:${containerType}:${containerId}`;
+
+    await transaction.$queryRaw`
+    SELECT pg_advisory_xact_lock(
+      hashtextextended(${lockKey}, 0)
+    )
+  `;
+  }
+
   private validateTemplateItems(items: CreateTemplateDto['items']) {
     const normalized = items ?? [];
+
     normalized.forEach((item, index) => {
-      if (item.parentIndex !== undefined && (item.parentIndex < 0 || item.parentIndex >= index)) {
-        throw new ForbiddenException('La plantilla contiene una referencia de padre inválida');
+      if (
+        item.parentIndex !== undefined &&
+        (
+          !Number.isInteger(item.parentIndex) ||
+          item.parentIndex < 0 ||
+          item.parentIndex >= index
+        )
+      ) {
+        throw new ForbiddenException(
+          'La plantilla contiene una referencia de padre inválida',
+        );
       }
-      if (item.dependsOnIndexes && new Set(item.dependsOnIndexes).size !== item.dependsOnIndexes.length) {
-        throw new ForbiddenException('Una plantilla no puede repetir dependencias');
+
+      const dependencies = item.dependsOnIndexes ?? [];
+
+      if (new Set(dependencies).size !== dependencies.length) {
+        throw new ForbiddenException(
+          'Una plantilla no puede repetir dependencias',
+        );
       }
-      if (item.dependsOnIndexes?.some((dependencyIndex) => dependencyIndex < 0 || dependencyIndex >= normalized.length || dependencyIndex === index)) {
-        throw new ForbiddenException('La plantilla contiene una dependencia inválida');
+
+      if (
+        dependencies.some(
+          (dependencyIndex) =>
+            !Number.isInteger(dependencyIndex) ||
+            dependencyIndex < 0 ||
+            dependencyIndex >= normalized.length ||
+            dependencyIndex === index,
+        )
+      ) {
+        throw new ForbiddenException(
+          'La plantilla contiene una dependencia inválida',
+        );
       }
     });
+
     const visiting = new Set<number>();
     const visited = new Set<number>();
+
     const visit = (index: number): void => {
-      if (visiting.has(index)) throw new ForbiddenException('La plantilla contiene dependencias circulares');
+      if (visiting.has(index)) {
+        throw new ForbiddenException(
+          'La plantilla contiene dependencias circulares',
+        );
+      }
       if (visited.has(index)) return;
       visiting.add(index);
-      for (const dependencyIndex of normalized[index]?.dependsOnIndexes ?? []) visit(dependencyIndex);
+      for (const dependencyIndex of normalized[index]?.dependsOnIndexes ?? []) {
+        visit(dependencyIndex);
+      }
       visiting.delete(index);
       visited.add(index);
     };
@@ -665,18 +868,121 @@ export class WorkManagementService {
     return normalized;
   }
 
-  private orderTemplateItems<T extends { id: string; parentId: string | null }>(items: T[]): T[] {
-    const remaining = [...items].sort((a, b) => a.id.localeCompare(b.id));
+  private validateStoredTemplateDependencies(
+    items: Array<{ id: string; dependsOnIds: unknown }>,
+  ): Map<string, string[]> {
+    const itemIds = new Set(items.map((item) => item.id));
+    const dependencies = new Map<string, string[]>();
+
+    for (const item of items) {
+      const rawDependencies = item.dependsOnIds;
+
+      if (rawDependencies === null || rawDependencies === undefined) {
+        dependencies.set(item.id, []);
+        continue;
+      }
+
+      if (
+        !Array.isArray(rawDependencies) ||
+        !rawDependencies.every(
+          (dependencyId) =>
+            typeof dependencyId === 'string' &&
+            dependencyId.length > 0,
+        )
+      ) {
+        throw new ForbiddenException(
+          'La plantilla contiene dependencias malformadas',
+        );
+      }
+
+      if (new Set(rawDependencies).size !== rawDependencies.length) {
+        throw new ForbiddenException(
+          'La plantilla contiene dependencias duplicadas',
+        );
+      }
+
+      for (const dependencyId of rawDependencies) {
+        if (
+          dependencyId === item.id ||
+          !itemIds.has(dependencyId)
+        ) {
+          throw new ForbiddenException(
+            'La plantilla contiene una dependencia inválida',
+          );
+        }
+      }
+
+      dependencies.set(item.id, [...rawDependencies]);
+    }
+
+    const visiting = new Set<string>();
+    const visited = new Set<string>();
+
+    const visit = (itemId: string): void => {
+      if (visiting.has(itemId)) {
+        throw new ForbiddenException(
+          'La plantilla contiene dependencias circulares',
+        );
+      }
+
+      if (visited.has(itemId)) return;
+
+      visiting.add(itemId);
+
+      for (const dependencyId of dependencies.get(itemId) ?? []) {
+        visit(dependencyId);
+      }
+
+      visiting.delete(itemId);
+      visited.add(itemId);
+    };
+
+    for (const item of items) {
+      visit(item.id);
+    }
+
+    return dependencies;
+  }
+
+  private orderTemplateItems<
+    T extends {
+      id: string;
+      parentId: string | null;
+      sortOrder: number;
+    },
+  >(items: T[]): T[] {
+    const remaining = [...items].sort(
+      (a, b) =>
+        a.sortOrder - b.sortOrder ||
+        a.id.localeCompare(b.id),
+    );
+
     const ordered: T[] = [];
     const placed = new Set<string>();
+
     while (remaining.length) {
-      const index = remaining.findIndex((item) => !item.parentId || placed.has(item.parentId));
-      if (index < 0) throw new ForbiddenException('La plantilla contiene una jerarquía circular o inválida');
+      const index = remaining.findIndex(
+        (item) => !item.parentId || placed.has(item.parentId),
+      );
+
+      if (index < 0) {
+        throw new ForbiddenException(
+          'La plantilla contiene una jerarquía circular o inválida',
+        );
+      }
+
       const [item] = remaining.splice(index, 1);
-      if (!item) throw new ForbiddenException('La plantilla contiene una jerarquía circular o inválida');
+
+      if (!item) {
+        throw new ForbiddenException(
+          'La plantilla contiene una jerarquía circular o inválida',
+        );
+      }
+
       ordered.push(item);
       placed.add(item.id);
     }
+
     return ordered;
   }
 
