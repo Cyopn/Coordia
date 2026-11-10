@@ -1,4 +1,4 @@
-import { ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { ForbiddenException, Inject, Injectable, NotFoundException, ConflictException } from '@nestjs/common';
 import { Prisma, TaskPriority, TaskStatus } from '@prisma/client';
 import { Request } from 'express';
 import { PERMISSIONS } from '@coordia/shared';
@@ -134,17 +134,25 @@ export class WorkManagementService {
     const userId = await this.authorized(organizationId, request, PERMISSIONS.TEMPLATE_MANAGE);
     const items = dto.items === undefined ? undefined : this.validateTemplateItems(dto.items);
     const updated = await this.prisma.$transaction(async (transaction) => {
-      const template = await transaction.projectTemplate.findFirst({
-        where: { id: templateId, organizationId, status: 'ACTIVE' },
-        select: { id: true },
-      });
-      if (!template) throw new NotFoundException('Plantilla no encontrada');
       await this.lockProjectWorkItemContainer(
         transaction,
         organizationId,
         'template',
         templateId,
       );
+
+      const template = await transaction.projectTemplate.findFirst({
+        where: {
+          id: templateId,
+          organizationId,
+          status: 'ACTIVE',
+        },
+        select: { id: true },
+      });
+
+      if (!template) {
+        throw new NotFoundException('Plantilla no encontrada');
+      }
       const result = await transaction.projectTemplate.update({
         where: { id: templateId },
         data: {
@@ -493,36 +501,91 @@ export class WorkManagementService {
     return adjustment;
   }
 
-  async addAbsence(organizationId: string, dto: CreateAbsenceDto, request: Request) {
-    const userId = await this.authorized(organizationId, request, PERMISSIONS.CAPACITY_MANAGE);
+  async addAbsence(organizationId: string, dto: CreateAbsenceDto, request: Request,) {
+    const userId = await this.authorized(
+      organizationId,
+      request,
+      PERMISSIONS.CAPACITY_MANAGE,
+    );
+
     const startsAt = new Date(dto.startsAt);
     const endsAt = new Date(dto.endsAt);
-    if (endsAt < startsAt) throw new ForbiddenException('El fin de la ausencia no puede preceder al inicio');
+
+    if (endsAt < startsAt) {
+      throw new ForbiddenException(
+        'El fin de la ausencia no puede preceder al inicio',
+      );
+    }
+
     const membership = await this.prisma.membership.findFirst({
-      where: { id: dto.membershipId, organizationId, status: 'ACTIVE' },
+      where: {
+        id: dto.membershipId,
+        organizationId,
+        status: 'ACTIVE',
+      },
       select: { id: true },
     });
-    if (!membership) throw new NotFoundException('Membresía no encontrada');
+
+    if (!membership) {
+      throw new NotFoundException('Membresía no encontrada');
+    }
+
     const overlap = await this.prisma.workAbsence.findFirst({
       where: {
+        organizationId,
         membershipId: dto.membershipId,
         startsAt: { lte: endsAt },
         endsAt: { gte: startsAt },
       },
       select: { id: true },
     });
-    if (overlap) throw new ForbiddenException('La ausencia se superpone con otra ausencia');
-    const absence = await this.prisma.workAbsence.create({
-      data: {
-        organizationId,
-        membershipId: dto.membershipId,
-        startsAt,
-        endsAt,
-        type: dto.type,
-        reason: dto.reason?.trim(),
-      },
-    });
-    await this.audit(organizationId, userId, 'capacity.absence_created', absence.id);
+
+    if (overlap) {
+      throw new ConflictException(
+        'La ausencia se superpone con otra ausencia',
+      );
+    }
+
+    let absence;
+
+    try {
+      absence = await this.prisma.workAbsence.create({
+        data: {
+          organizationId,
+          membershipId: dto.membershipId,
+          startsAt,
+          endsAt,
+          type: dto.type,
+          reason: dto.reason?.trim(),
+        },
+      });
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        (error.code === 'P2004' || error.code === 'P2010')
+      ) {
+        const metadata = JSON.stringify(error.meta ?? {});
+
+        if (
+          metadata.includes('23P01') ||
+          metadata.includes('WorkAbsence_no_overlapping_dates')
+        ) {
+          throw new ConflictException(
+            'La ausencia se superpone con otra ausencia',
+          );
+        }
+      }
+
+      throw error;
+    }
+
+    await this.audit(
+      organizationId,
+      userId,
+      'capacity.absence_created',
+      absence.id,
+    );
+
     return absence;
   }
 

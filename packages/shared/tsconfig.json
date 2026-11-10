@@ -3,7 +3,8 @@
   "compilerOptions": {
     "module": "ESNext",
     "moduleResolution": "Bundler",
-    "declaration": true
+    "declaration": true,
+    "outDir": "./dist",
   },
   "include": ["src/**/*.ts"]
 }
