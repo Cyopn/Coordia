@@ -10,7 +10,7 @@
     "prisma:migrate:deploy": "prisma migrate deploy --schema prisma/schema.prisma",
     "prisma:seed": "corepack pnpm --filter @coordia/api exec tsx ../../prisma/seed.ts",
     "prisma:validate": "prisma validate --schema prisma/schema.prisma",
-    "test": "corepack pnpm --recursive test",
+    "test": "corepack pnpm --filter @coordia/shared build && corepack pnpm --recursive test",
     "typecheck": "corepack pnpm --filter @coordia/shared build && corepack pnpm --recursive typecheck"
   },
   "devDependencies": {

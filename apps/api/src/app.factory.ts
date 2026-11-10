@@ -37,7 +37,7 @@ function validateConfiguration(): void {
   if (missing.length || invalidNumeric.length) {
     throw new Error(
       `Configuración inválida. Faltan: ${missing.join(', ') || 'ninguna'}; ` +
-        `valores numéricos inválidos: ${invalidNumeric.join(', ') || 'ninguno'}`,
+      `valores numéricos inválidos: ${invalidNumeric.join(', ') || 'ninguno'}`,
     );
   }
   if (process.env.MFA_ENCRYPTION_KEY) {
