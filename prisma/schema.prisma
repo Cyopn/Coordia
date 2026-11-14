@@ -491,6 +491,7 @@ model OrganizationSettings {
   workingHours   Json?
   workingDays    Json?
   planning       Json?
+  timeZone       String       @default("UTC")
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)

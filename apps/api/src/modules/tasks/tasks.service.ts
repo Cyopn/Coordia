@@ -133,6 +133,68 @@ export class TasksService {
     });
   }
 
+  private async ensureNoDependencyCycleInTransaction(
+    transaction: Prisma.TransactionClient,
+    projectId: string,
+    dependsOnIds: string[],
+    taskId: string,
+  ): Promise<void> {
+    if (!dependsOnIds.length) return;
+
+    const edges = await transaction.taskDependency.findMany({
+      where: { projectId },
+      select: {
+        taskId: true,
+        dependsOnId: true,
+      },
+    });
+
+    const graph = new Map<string, string[]>();
+
+    for (const edge of edges) {
+      if (edge.taskId === taskId) continue;
+
+      graph.set(edge.taskId, [
+        ...(graph.get(edge.taskId) ?? []),
+        edge.dependsOnId,
+      ]);
+    }
+
+    for (const dependencyId of dependsOnIds) {
+      const stack = [dependencyId];
+      const visited = new Set<string>();
+
+      while (stack.length) {
+        const current = stack.pop();
+
+        if (!current || visited.has(current)) continue;
+
+        if (current === taskId) {
+          throw new ConflictException(
+            'La dependencia generaría un ciclo',
+          );
+        }
+
+        visited.add(current);
+        stack.push(...(graph.get(current) ?? []));
+      }
+    }
+  }
+
+  private async lockProjectDependencyGraph(
+    transaction: Prisma.TransactionClient,
+    organizationId: string,
+    projectId: string,
+  ): Promise<void> {
+    const lockKey = `dependencies:${organizationId}:${projectId}`;
+
+    await transaction.$queryRaw`
+    SELECT pg_advisory_xact_lock(
+      hashtextextended(${lockKey}, 0)
+    )
+  `;
+  }
+
   async createTask(
     organizationId: string,
     projectId: string,
@@ -147,13 +209,43 @@ export class TasksService {
     await this.projectInOrganization(userId, organizationId, projectId, PERMISSIONS.RESOURCE_CREATE);
     await this.validateRelations(organizationId, projectId, dto);
     await this.ensureNoDependencyCycle(projectId, dto.dependsOnIds ?? []);
-    await this.ensureAssignmentCapacity(organizationId, projectId, {
-      assigneeId: dto.assigneeId,
-      startsAt: dto.startsAt ? new Date(dto.startsAt) : null,
-      dueAt: dto.dueAt ? new Date(dto.dueAt) : null,
-      estimatedHours: dto.estimatedHours,
-    });
     const task = await this.prisma.$transaction(async (transaction) => {
+      if (dto.dependsOnIds?.length) {
+        await this.lockProjectDependencyGraph(
+          transaction,
+          organizationId,
+          projectId,
+        );
+      }
+      const dependencyIdsToLock = [...new Set(dto.dependsOnIds ?? [])]
+        .sort((a, b) => a.localeCompare(b));
+
+      for (const dependencyId of dependencyIdsToLock) {
+        await this.lockTaskRow(
+          transaction,
+          organizationId,
+          projectId,
+          dependencyId,
+        );
+      }
+
+      await this.lockAssignmentCapacity(
+        transaction,
+        organizationId,
+        [dto.assigneeId],
+      );
+
+      await this.ensureAssignmentCapacity(
+        transaction,
+        organizationId,
+        projectId,
+        {
+          assigneeId: dto.assigneeId,
+          startsAt: dto.startsAt ? new Date(dto.startsAt) : null,
+          dueAt: dto.dueAt ? new Date(dto.dueAt) : null,
+          estimatedHours: dto.estimatedHours,
+        },
+      );
       const created = await transaction.task.create({
         data: {
           organizationId,
@@ -369,14 +461,30 @@ export class TasksService {
     }
     await this.validateRelations(organizationId, projectId, dto);
     await this.ensureNoDependencyCycle(projectId, dto.dependsOnIds ?? [], taskId);
-    await this.ensureAssignmentCapacity(organizationId, projectId, {
-      taskId,
-      assigneeId: dto.assigneeId !== undefined ? dto.assigneeId : task.assigneeId ?? undefined,
-      startsAt: dto.startsAt !== undefined ? new Date(dto.startsAt) : task.startsAt,
-      dueAt: dto.dueAt !== undefined ? new Date(dto.dueAt) : task.dueAt,
-      estimatedHours: dto.estimatedHours !== undefined ? dto.estimatedHours : Number(task.estimatedHours ?? 0),
-    });
     const updated = await this.prisma.$transaction(async (transaction) => {
+      if (dto.dependsOnIds !== undefined) {
+        await this.lockProjectDependencyGraph(
+          transaction,
+          organizationId,
+          projectId,
+        );
+      }
+      const rowsToLock = [
+        ...new Set([
+          taskId,
+          ...task.dependencies.map(({ dependsOnId }) => dependsOnId),
+          ...(dto.dependsOnIds ?? []),
+        ]),
+      ].sort((a, b) => a.localeCompare(b));
+      for (const rowId of rowsToLock) {
+        await this.lockTaskRow(
+          transaction,
+          organizationId,
+          projectId,
+          rowId,
+        );
+      }
+
       const previous = await transaction.task.findUniqueOrThrow({
         where: {
           organizationId_id: {
@@ -398,12 +506,78 @@ export class TasksService {
           collaborators: { select: { membershipId: true } },
         },
       });
+      const previousDependencyIds = previous.dependencies
+        .map(({ dependsOnId }) => dependsOnId)
+        .sort((a, b) => a.localeCompare(b));
+
+      const snapshotDependencyIds = task.dependencies
+        .map(({ dependsOnId }) => dependsOnId)
+        .sort((a, b) => a.localeCompare(b));
+
+      if (
+        previousDependencyIds.length !== snapshotDependencyIds.length ||
+        previousDependencyIds.some(
+          (id, index) => id !== snapshotDependencyIds[index],
+        )
+      ) {
+        throw new ConflictException(
+          'Las dependencias de la tarea cambiaron concurrentemente. Actualiza la información e intenta nuevamente.',
+        );
+      }
+      if (dto.dependsOnIds !== undefined) {
+        await this.ensureNoDependencyCycleInTransaction(
+          transaction,
+          projectId,
+          dto.dependsOnIds,
+          taskId,
+        );
+      }
+      const assigneeId =
+        dto.assigneeId === undefined
+          ? previous.assigneeId
+          : dto.assigneeId;
+
+      const startsAt =
+        dto.startsAt === undefined
+          ? previous.startsAt
+          : new Date(dto.startsAt);
+
+      const dueAt =
+        dto.dueAt === undefined
+          ? previous.dueAt
+          : new Date(dto.dueAt);
+
+      const estimatedHours =
+        dto.estimatedHours === undefined
+          ? Number(previous.estimatedHours ?? 0)
+          : dto.estimatedHours;
+
+      await this.lockAssignmentCapacity(
+        transaction,
+        organizationId,
+        [previous.assigneeId, assigneeId],
+      );
+
+      await this.ensureAssignmentCapacity(
+        transaction,
+        organizationId,
+        projectId,
+        {
+          taskId,
+          assigneeId: assigneeId ?? undefined,
+          startsAt,
+          dueAt,
+          estimatedHours,
+        },
+      );
       const updated = await transaction.task.update({
         where: { id: taskId },
         data: {
           parentTaskId: dto.parentTaskId === undefined ? previous.parentTaskId : dto.parentTaskId,
           assigneeId: dto.assigneeId === undefined ? previous.assigneeId : dto.assigneeId,
-          title: dto.title.trim(),
+          title: dto.title === undefined
+            ? previous.title
+            : dto.title.trim(),
           description: dto.description === undefined ? previous.description : dto.description.trim() || null,
           status: dto.status,
           priority: dto.priority,
@@ -533,6 +707,7 @@ export class TasksService {
     organizationId: string,
     projectId: string,
     actorId: string,
+    attempt = 0,
   ): Promise<void> {
     const project = await this.prisma.project.findFirst({
       where: { id: projectId, organizationId },
@@ -585,42 +760,193 @@ export class TasksService {
         const durationHours = Math.max(1, Number(task.estimatedHours ?? 1));
         const due = this.addWorkingHours(start, durationHours, schedule);
         if (task.startsAt?.getTime() !== start.getTime() || task.dueAt?.getTime() !== due.getTime()) {
-          await this.ensureAssignmentCapacity(organizationId, projectId, {
-            taskId: task.id,
-            assigneeId: task.assigneeId ?? undefined,
-            startsAt: start,
-            dueAt: due,
-            estimatedHours: Number(task.estimatedHours ?? 0),
+          const updated = await this.prisma.$transaction(async (transaction) => {
+            const snapshotDependencyIds = task.dependencies
+              .map(({ dependsOnId }) => dependsOnId);
+
+            const rowsToLock = [
+              ...new Set([task.id, ...snapshotDependencyIds]),
+            ].sort((a, b) => a.localeCompare(b));
+
+            for (const rowId of rowsToLock) {
+              await this.lockTaskRow(
+                transaction,
+                organizationId,
+                projectId,
+                rowId,
+              );
+            }
+
+            const currentDependencyIds = await transaction.task.findUniqueOrThrow({
+              where: {
+                organizationId_id: {
+                  organizationId,
+                  id: task.id,
+                },
+              },
+              select: {
+                dependencies: {
+                  select: {
+                    dependsOnId: true,
+                  },
+                },
+              },
+            });
+
+            const currentIds = currentDependencyIds.dependencies
+              .map(({ dependsOnId }) => dependsOnId)
+              .sort((a, b) => a.localeCompare(b));
+
+            const snapshotIds = [...snapshotDependencyIds].sort(
+              (a, b) => a.localeCompare(b),
+            );
+
+            if (
+              snapshotIds.length !== currentIds.length ||
+              snapshotIds.some((id, index) => id !== currentIds[index])
+            ) {
+              return null;
+            }
+
+            const currentTask = await transaction.task.findUniqueOrThrow({
+              where: {
+                organizationId_id: {
+                  organizationId,
+                  id: task.id,
+                },
+              },
+              select: {
+                assigneeId: true,
+                startsAt: true,
+                dueAt: true,
+                estimatedHours: true,
+                dependencies: {
+                  select: {
+                    dependsOnId: true,
+                    dependsOn: {
+                      select: {
+                        dueAt: true,
+                      },
+                    },
+                  },
+                },
+              },
+            });
+
+            const sameDate = (left: Date | null, right: Date | null) =>
+              left?.getTime() === right?.getTime();
+
+            const snapshotDependencies = [...task.dependencies]
+              .sort((a, b) => a.dependsOnId.localeCompare(b.dependsOnId));
+
+            const currentDependencies = [...currentTask.dependencies]
+              .sort((a, b) => a.dependsOnId.localeCompare(b.dependsOnId));
+
+            const dependenciesChanged =
+              snapshotDependencies.length !== currentDependencies.length ||
+              snapshotDependencies.some((dependency, index) => {
+                const currentDependency = currentDependencies[index];
+                const snapshotDueAt = byId.get(dependency.dependsOnId)?.dueAt ?? null;
+                const currentDueAt = currentDependency?.dependsOn.dueAt ?? null;
+
+                return (
+                  dependency.dependsOnId !== currentDependency?.dependsOnId ||
+                  !sameDate(snapshotDueAt, currentDueAt)
+                );
+              });
+
+            const taskChanged =
+              currentTask.assigneeId !== task.assigneeId ||
+              Number(currentTask.estimatedHours ?? 0) !==
+              Number(task.estimatedHours ?? 0) ||
+              !sameDate(currentTask.startsAt, task.startsAt) ||
+              !sameDate(currentTask.dueAt, task.dueAt) ||
+              dependenciesChanged;
+            if (taskChanged) return null;
+
+            await this.lockAssignmentCapacity(
+              transaction,
+              organizationId,
+              [currentTask.assigneeId],
+            );
+
+            await this.ensureAssignmentCapacity(
+              transaction,
+              organizationId,
+              projectId,
+              {
+                taskId: task.id,
+                assigneeId: currentTask.assigneeId ?? undefined,
+                startsAt: start,
+                dueAt: due,
+                estimatedHours: Number(currentTask.estimatedHours ?? 0),
+              },
+            );
+
+            const actorMembership = await transaction.membership.findUniqueOrThrow({
+              where: {
+                userId_organizationId: {
+                  userId: actorId,
+                  organizationId,
+                },
+              },
+              select: { id: true },
+            });
+
+            const result = await transaction.task.update({
+              where: {
+                organizationId_id: {
+                  organizationId,
+                  id: task.id,
+                },
+              },
+              data: {
+                startsAt: start,
+                dueAt: due,
+              },
+            });
+
+            await transaction.taskHistory.createMany({
+              data: [
+                {
+                  organizationId,
+                  taskId: task.id,
+                  actorId: actorMembership.id,
+                  field: 'startsAt',
+                  oldValue: currentTask.startsAt?.toISOString() ?? null,
+                  newValue: start.toISOString(),
+                },
+                {
+                  organizationId,
+                  taskId: task.id,
+                  actorId: actorMembership.id,
+                  field: 'dueAt',
+                  oldValue: currentTask.dueAt?.toISOString() ?? null,
+                  newValue: due.toISOString(),
+                },
+              ],
+            });
+
+            return result;
           });
-          const oldStartsAt = task.startsAt?.toISOString();
-          const oldDueAt = task.dueAt?.toISOString();
-          const actorMembershipId = await this.membershipId(actorId, organizationId);
-          const updated = await this.prisma.task.update({
-            where: { id: task.id },
-            data: { startsAt: start, dueAt: due },
-          });
+
+          if (!updated) {
+            if (attempt >= 2) {
+              throw new ConflictException(
+                'No fue posible recalcular las fechas porque las tareas cambiaron concurrentemente. Intenta nuevamente.',
+              );
+            }
+
+            return this.recalculateDependentDates(
+              organizationId,
+              projectId,
+              actorId,
+              attempt + 1,
+            );
+          }
+
           task.startsAt = updated.startsAt;
           task.dueAt = updated.dueAt;
-          await this.prisma.taskHistory.createMany({
-            data: [
-              {
-                organizationId,
-                taskId: task.id,
-                actorId: actorMembershipId,
-                field: 'startsAt',
-                oldValue: oldStartsAt,
-                newValue: start.toISOString(),
-              },
-              {
-                organizationId,
-                taskId: task.id,
-                actorId: actorMembershipId,
-                field: 'dueAt',
-                oldValue: oldDueAt,
-                newValue: due.toISOString(),
-              },
-            ],
-          });
         }
         pending.delete(taskId);
         changed = true;
@@ -702,7 +1028,45 @@ export class TasksService {
     return cursor;
   }
 
+  private async lockAssignmentCapacity(
+    transaction: Prisma.TransactionClient,
+    organizationId: string,
+    membershipIds: Array<string | null | undefined>,
+  ): Promise<void> {
+    const uniqueIds = [...new Set(
+      membershipIds.filter((id): id is string => Boolean(id)),
+    )].sort();
+
+    for (const membershipId of uniqueIds) {
+      const lockKey = `capacity:${organizationId}:${membershipId}`;
+
+      await transaction.$queryRaw`
+      SELECT pg_advisory_xact_lock(
+        hashtextextended(${lockKey}, 0)
+      )
+    `;
+    }
+  }
+
+  private async lockTaskRow(
+    transaction: Prisma.TransactionClient,
+    organizationId: string,
+    projectId: string,
+    taskId: string,
+  ): Promise<void> {
+    await transaction.$queryRaw`
+    SELECT "id"
+    FROM "Task"
+    WHERE
+      "organizationId" = ${organizationId}::uuid
+      AND "projectId" = ${projectId}::uuid
+      AND "id" = ${taskId}::uuid
+    FOR UPDATE
+  `;
+  }
+
   private async ensureAssignmentCapacity(
+    transaction: Prisma.TransactionClient,
     organizationId: string,
     projectId: string,
     input: {
@@ -714,7 +1078,9 @@ export class TasksService {
     },
   ): Promise<void> {
     if (!input.assigneeId || !input.startsAt || !input.dueAt || input.dueAt < input.startsAt) return;
-    const project = await this.prisma.project.findFirst({
+    const rangeStart = this.startOfUtcDay(input.startsAt);
+    const rangeEnd = this.startOfUtcDay(input.dueAt);
+    const project = await transaction.project.findFirst({
       where: { id: projectId, organizationId },
       select: { configuration: true },
     });
@@ -722,7 +1088,7 @@ export class TasksService {
       ? project.configuration as { workingDays?: unknown; workingHours?: unknown }
       : {};
     if (!project?.configuration) {
-      const settings = await this.prisma.organizationSettings.findUnique({
+      const settings = await transaction.organizationSettings.findUnique({
         where: { organizationId },
         select: { workingDays: true, workingHours: true },
       });
@@ -740,8 +1106,8 @@ export class TasksService {
     const dailyHours = this.dailyHours(hours);
     const totalDays = this.workingDaysBetween(input.startsAt, input.dueAt, days);
     if (!totalDays || dailyHours <= 0) return;
-    const [existing, absences, adjustments] = await this.prisma.$transaction([
-      this.prisma.task.findMany({
+    const [existing, absences, adjustments] = await Promise.all([
+      transaction.task.findMany({
         where: {
           project: { organizationId },
           assigneeId: input.assigneeId,
@@ -749,15 +1115,39 @@ export class TasksService {
           startsAt: { lte: input.dueAt },
           dueAt: { gte: input.startsAt },
         },
-        select: { startsAt: true, dueAt: true, estimatedHours: true },
+        select: {
+          startsAt: true,
+          dueAt: true,
+          estimatedHours: true,
+        },
       }),
-      this.prisma.workAbsence.findMany({
-        where: { organizationId, membershipId: input.assigneeId, startsAt: { lte: input.dueAt }, endsAt: { gte: input.startsAt } },
-        select: { startsAt: true, endsAt: true },
+
+      transaction.workAbsence.findMany({
+        where: {
+          organizationId,
+          membershipId: input.assigneeId,
+          startsAt: { lte: rangeEnd },
+          endsAt: { gte: rangeStart },
+        },
+        select: {
+          startsAt: true,
+          endsAt: true,
+        },
       }),
-      this.prisma.workCapacityAdjustment.findMany({
-        where: { organizationId, membershipId: input.assigneeId, date: { gte: input.startsAt, lte: input.dueAt } },
-        select: { hours: true, type: true },
+
+      transaction.workCapacityAdjustment.findMany({
+        where: {
+          organizationId,
+          membershipId: input.assigneeId,
+          date: {
+            gte: rangeStart,
+            lte: rangeEnd,
+          },
+        },
+        select: {
+          hours: true,
+          type: true,
+        },
       }),
     ]);
     const available = Math.max(
