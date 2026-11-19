@@ -352,31 +352,33 @@ model ProjectAccess {
 }
 
 model Task {
-  id             String             @id @default(uuid()) @db.Uuid
-  projectId      String             @db.Uuid
-  organizationId String             @db.Uuid
-  parentTaskId   String?            @db.Uuid
-  assigneeId     String?            @db.Uuid
-  title          String
-  description    String?
-  status         TaskStatus         @default(TODO)
-  priority       TaskPriority       @default(MEDIUM)
-  dueAt          DateTime?
-  startsAt       DateTime?
-  estimatedHours Decimal?           @db.Decimal(8, 2)
-  createdAt      DateTime           @default(now())
-  updatedAt      DateTime           @updatedAt
-  project        Project            @relation(fields: [organizationId, projectId], references: [organizationId, id], onDelete: Cascade)
-  parentTask     Task?              @relation("TaskSubtasks", fields: [projectId, parentTaskId], references: [projectId, id], onDelete: Cascade)
-  subtasks       Task[]             @relation("TaskSubtasks")
-  assignee       Membership?        @relation("TaskAssignee", fields: [organizationId, assigneeId], references: [organizationId, id], onDelete: Restrict)
-  labels         TaskLabel[]
-  dependencies   TaskDependency[]   @relation("TaskDependencies")
-  dependents     TaskDependency[]   @relation("TaskDependents")
-  comments       TaskComment[]
-  history        TaskHistory[]
-  objectiveLinks ObjectiveTask[]
-  collaborators  TaskCollaborator[]
+  id              String             @id @default(uuid()) @db.Uuid
+  projectId       String             @db.Uuid
+  organizationId  String             @db.Uuid
+  parentTaskId    String?            @db.Uuid
+  assigneeId      String?            @db.Uuid
+  title           String
+  description     String?
+  status          TaskStatus         @default(TODO)
+  priority        TaskPriority       @default(MEDIUM)
+  dueAt           DateTime?
+  startsAt        DateTime?
+  plannedStartsAt DateTime?
+  plannedFinishAt DateTime?
+  estimatedHours  Decimal?           @db.Decimal(8, 2)
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+  project         Project            @relation(fields: [organizationId, projectId], references: [organizationId, id], onDelete: Cascade)
+  parentTask      Task?              @relation("TaskSubtasks", fields: [projectId, parentTaskId], references: [projectId, id], onDelete: Cascade)
+  subtasks        Task[]             @relation("TaskSubtasks")
+  assignee        Membership?        @relation("TaskAssignee", fields: [organizationId, assigneeId], references: [organizationId, id], onDelete: Restrict)
+  labels          TaskLabel[]
+  dependencies    TaskDependency[]   @relation("TaskDependencies")
+  dependents      TaskDependency[]   @relation("TaskDependents")
+  comments        TaskComment[]
+  history         TaskHistory[]
+  objectiveLinks  ObjectiveTask[]
+  collaborators   TaskCollaborator[]
 
   @@unique([organizationId, id])
   @@unique([projectId, id])

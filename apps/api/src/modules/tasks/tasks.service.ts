@@ -9,6 +9,7 @@ import { CreateLabelDto } from './dto/create-label.dto';
 import { CreateTaskDto } from './dto/create-task.dto';
 import { ListTasksQueryDto } from './dto/list-tasks-query.dto';
 import { UpdateTaskDto } from './dto/update-task.dto';
+import { Temporal } from '@js-temporal/polyfill';
 
 @Injectable()
 export class TasksService {
@@ -295,7 +296,22 @@ export class TasksService {
       });
       return created;
     });
-    return task;
+
+    await this.recalculateDependentDates(
+      organizationId,
+      projectId,
+      userId,
+    );
+
+    return this.prisma.task.findUniqueOrThrow({
+      where: {
+        organizationId_id: {
+          organizationId,
+          id: task.id,
+        },
+      },
+      include: this.taskInclude(),
+    });
   }
 
   async listTasks(
@@ -663,10 +679,27 @@ export class TasksService {
       });
       return updated;
     });
-    if (dto.dependsOnIds !== undefined || dto.startsAt !== undefined || dto.dueAt !== undefined) {
-      await this.recalculateDependentDates(organizationId, projectId, userId);
+    if (
+      dto.dependsOnIds !== undefined ||
+      dto.startsAt !== undefined ||
+      dto.dueAt !== undefined ||
+      dto.estimatedHours !== undefined
+    ) {
+      await this.recalculateDependentDates(
+        organizationId,
+        projectId,
+        userId,
+      );
     }
-    return updated;
+    return this.prisma.task.findUniqueOrThrow({
+      where: {
+        organizationId_id: {
+          organizationId,
+          id: taskId,
+        },
+      },
+      include: this.taskInclude(),
+    });
   }
 
   async deleteTask(organizationId: string, projectId: string, taskId: string, request: Request) {
@@ -703,6 +736,7 @@ export class TasksService {
     }
   }
 
+
   private async recalculateDependentDates(
     organizationId: string,
     projectId: string,
@@ -711,159 +745,238 @@ export class TasksService {
   ): Promise<void> {
     const project = await this.prisma.project.findFirst({
       where: { id: projectId, organizationId },
-      select: { delayPolicy: true, configuration: true },
+      select: {
+        delayPolicy: true,
+        configuration: true,
+        startsAt: true,
+      },
     });
+
     if (project?.delayPolicy !== 'AUTO_RESCHEDULE') return;
-    const organizationSettings = await this.prisma.organizationSettings.findUnique({
-      where: { organizationId },
-      select: { workingDays: true, workingHours: true },
-    });
-    const configuration = project.configuration && typeof project.configuration === 'object'
-      ? project.configuration as { workingDays?: unknown; workingHours?: unknown }
-      : {};
+
+    const organizationSettings =
+      await this.prisma.organizationSettings.findUnique({
+        where: { organizationId },
+        select: {
+          workingDays: true,
+          workingHours: true,
+          timeZone: true,
+        },
+      });
+
+    const timeZone = organizationSettings?.timeZone ?? 'UTC';
+
+    try {
+      Temporal.Instant
+        .fromEpochMilliseconds(Date.now())
+        .toZonedDateTimeISO(timeZone);
+    } catch {
+      throw new ConflictException(
+        `La zona horaria configurada no es válida: ${timeZone}`,
+      );
+    }
+
+    const configuration =
+      project.configuration && typeof project.configuration === 'object'
+        ? project.configuration as {
+          workingDays?: unknown;
+          workingHours?: unknown;
+        }
+        : {};
+
     const schedule = this.schedule(
       configuration.workingDays ?? organizationSettings?.workingDays,
       configuration.workingHours ?? organizationSettings?.workingHours,
     );
+
     const tasks = await this.prisma.task.findMany({
-      where: { projectId },
+      where: { projectId, organizationId },
       select: {
         id: true,
         assigneeId: true,
         startsAt: true,
         dueAt: true,
+        plannedStartsAt: true,
+        plannedFinishAt: true,
         estimatedHours: true,
-        dependencies: { select: { dependsOnId: true } },
+        dependencies: {
+          select: { dependsOnId: true },
+        },
       },
     });
+
     const byId = new Map(tasks.map((task) => [task.id, task]));
     const pending = new Set(tasks.map((task) => task.id));
-    let changed = true;
-    while (pending.size && changed) {
-      changed = false;
+    const plannedStarts = new Map<string, Date | null>();
+    const plannedFinishes = new Map<string, Date | null>();
+
+    while (pending.size) {
+      let progress = false;
+
       for (const taskId of [...pending]) {
         const task = byId.get(taskId);
         if (!task) {
           pending.delete(taskId);
+          progress = true;
           continue;
         }
-        const dependencies = task.dependencies
-          .map(({ dependsOnId }) => byId.get(dependsOnId))
-          .filter((dependency): dependency is NonNullable<typeof dependency> => Boolean(dependency));
-        if (dependencies.some((dependency) => !dependency.dueAt)) continue;
-        if (!dependencies.length) {
-          pending.delete(taskId);
-          continue;
+
+        const dependencyIds = task.dependencies.map(
+          ({ dependsOnId }) => dependsOnId,
+        );
+
+        if (dependencyIds.some((id) => pending.has(id))) continue;
+
+        const dependencyFinishes = dependencyIds.map(
+          (id) => plannedFinishes.get(id) ?? null,
+        );
+
+        const dependenciesCanBePlanned =
+          dependencyFinishes.every((date) => date !== null);
+
+        const startCandidates = [
+          project.startsAt,
+          task.startsAt,
+          ...dependencyFinishes,
+        ].filter((date): date is Date => date !== null);
+
+        let plannedStart: Date | null = null;
+        let plannedFinish: Date | null = null;
+
+        if (
+          dependenciesCanBePlanned &&
+          startCandidates.length > 0
+        ) {
+          const earliestAllowed = new Date(
+            Math.max(...startCandidates.map((date) => date.getTime())),
+          );
+
+          plannedStart = this.nextWorkingTime(
+            earliestAllowed,
+            schedule,
+            timeZone,
+          );
+          const durationHours = Math.max(
+            1,
+            Number(task.estimatedHours ?? 1),
+          );
+
+          plannedFinish = this.addWorkingHours(
+            plannedStart,
+            durationHours,
+            schedule,
+            timeZone,
+          );
         }
-        const dependencyDue = new Date(Math.max(...dependencies.map((dependency) => dependency.dueAt!.getTime())));
-        const start = this.nextWorkingTime(dependencyDue, schedule);
-        const durationHours = Math.max(1, Number(task.estimatedHours ?? 1));
-        const due = this.addWorkingHours(start, durationHours, schedule);
-        if (task.startsAt?.getTime() !== start.getTime() || task.dueAt?.getTime() !== due.getTime()) {
-          const updated = await this.prisma.$transaction(async (transaction) => {
-            const snapshotDependencyIds = task.dependencies
-              .map(({ dependsOnId }) => dependsOnId);
 
-            const rowsToLock = [
-              ...new Set([task.id, ...snapshotDependencyIds]),
-            ].sort((a, b) => a.localeCompare(b));
+        plannedStarts.set(taskId, plannedStart);
+        plannedFinishes.set(taskId, plannedFinish);
+        pending.delete(taskId);
+        progress = true;
+      }
 
-            for (const rowId of rowsToLock) {
-              await this.lockTaskRow(
-                transaction,
-                organizationId,
-                projectId,
-                rowId,
-              );
-            }
+      if (!progress) {
+        throw new ConflictException(
+          'El proyecto contiene una dependencia circular o inconsistente',
+        );
+      }
+    }
 
-            const currentDependencyIds = await transaction.task.findUniqueOrThrow({
-              where: {
-                organizationId_id: {
-                  organizationId,
-                  id: task.id,
-                },
-              },
-              select: {
-                dependencies: {
-                  select: {
-                    dependsOnId: true,
-                  },
-                },
-              },
-            });
+    const sameDate = (
+      left: Date | null,
+      right: Date | null,
+    ): boolean => left?.getTime() === right?.getTime();
 
-            const currentIds = currentDependencyIds.dependencies
-              .map(({ dependsOnId }) => dependsOnId)
-              .sort((a, b) => a.localeCompare(b));
+    for (const task of tasks) {
+      const start = plannedStarts.get(task.id) ?? null;
+      const finish = plannedFinishes.get(task.id) ?? null;
 
-            const snapshotIds = [...snapshotDependencyIds].sort(
-              (a, b) => a.localeCompare(b),
+      if (
+        sameDate(task.plannedStartsAt, start) &&
+        sameDate(task.plannedFinishAt, finish)
+      ) {
+        continue;
+      }
+
+      const updated = await this.prisma.$transaction(
+        async (transaction) => {
+          const snapshotDependencyIds = task.dependencies
+            .map(({ dependsOnId }) => dependsOnId);
+
+          const rowsToLock = [
+            ...new Set([task.id, ...snapshotDependencyIds]),
+          ].sort((a, b) => a.localeCompare(b));
+
+          for (const rowId of rowsToLock) {
+            await this.lockTaskRow(
+              transaction,
+              organizationId,
+              projectId,
+              rowId,
             );
+          }
 
-            if (
-              snapshotIds.length !== currentIds.length ||
-              snapshotIds.some((id, index) => id !== currentIds[index])
-            ) {
-              return null;
-            }
-
-            const currentTask = await transaction.task.findUniqueOrThrow({
-              where: {
-                organizationId_id: {
-                  organizationId,
-                  id: task.id,
-                },
+          const currentTask = await transaction.task.findUniqueOrThrow({
+            where: {
+              organizationId_id: {
+                organizationId,
+                id: task.id,
               },
-              select: {
-                assigneeId: true,
-                startsAt: true,
-                dueAt: true,
-                estimatedHours: true,
-                dependencies: {
-                  select: {
-                    dependsOnId: true,
-                    dependsOn: {
-                      select: {
-                        dueAt: true,
-                      },
+            },
+            select: {
+              assigneeId: true,
+              startsAt: true,
+              dueAt: true,
+              plannedStartsAt: true,
+              plannedFinishAt: true,
+              estimatedHours: true,
+              dependencies: {
+                select: {
+                  dependsOnId: true,
+                  dependsOn: {
+                    select: {
+                      plannedFinishAt: true,
                     },
                   },
                 },
               },
+            },
+          });
+
+          const snapshotDependencies = [...task.dependencies]
+            .sort((a, b) => a.dependsOnId.localeCompare(b.dependsOnId));
+
+          const currentDependencies = [...currentTask.dependencies]
+            .sort((a, b) => a.dependsOnId.localeCompare(b.dependsOnId));
+
+          const dependenciesChanged =
+            snapshotDependencies.length !== currentDependencies.length ||
+            snapshotDependencies.some((dependency, index) => {
+              const currentDependency = currentDependencies[index];
+              const snapshotFinish =
+                byId.get(dependency.dependsOnId)?.plannedFinishAt ?? null;
+              const currentFinish =
+                currentDependency?.dependsOn.plannedFinishAt ?? null;
+
+              return (
+                dependency.dependsOnId !== currentDependency?.dependsOnId ||
+                !sameDate(snapshotFinish, currentFinish)
+              );
             });
 
-            const sameDate = (left: Date | null, right: Date | null) =>
-              left?.getTime() === right?.getTime();
+          const taskChanged =
+            currentTask.assigneeId !== task.assigneeId ||
+            Number(currentTask.estimatedHours ?? 0) !==
+            Number(task.estimatedHours ?? 0) ||
+            !sameDate(currentTask.startsAt, task.startsAt) ||
+            !sameDate(currentTask.dueAt, task.dueAt) ||
+            !sameDate(currentTask.plannedStartsAt, task.plannedStartsAt) ||
+            !sameDate(currentTask.plannedFinishAt, task.plannedFinishAt) ||
+            dependenciesChanged;
 
-            const snapshotDependencies = [...task.dependencies]
-              .sort((a, b) => a.dependsOnId.localeCompare(b.dependsOnId));
+          if (taskChanged) return null;
 
-            const currentDependencies = [...currentTask.dependencies]
-              .sort((a, b) => a.dependsOnId.localeCompare(b.dependsOnId));
-
-            const dependenciesChanged =
-              snapshotDependencies.length !== currentDependencies.length ||
-              snapshotDependencies.some((dependency, index) => {
-                const currentDependency = currentDependencies[index];
-                const snapshotDueAt = byId.get(dependency.dependsOnId)?.dueAt ?? null;
-                const currentDueAt = currentDependency?.dependsOn.dueAt ?? null;
-
-                return (
-                  dependency.dependsOnId !== currentDependency?.dependsOnId ||
-                  !sameDate(snapshotDueAt, currentDueAt)
-                );
-              });
-
-            const taskChanged =
-              currentTask.assigneeId !== task.assigneeId ||
-              Number(currentTask.estimatedHours ?? 0) !==
-              Number(task.estimatedHours ?? 0) ||
-              !sameDate(currentTask.startsAt, task.startsAt) ||
-              !sameDate(currentTask.dueAt, task.dueAt) ||
-              dependenciesChanged;
-            if (taskChanged) return null;
-
+          if (start && finish) {
             await this.lockAssignmentCapacity(
               transaction,
               organizationId,
@@ -878,12 +991,14 @@ export class TasksService {
                 taskId: task.id,
                 assigneeId: currentTask.assigneeId ?? undefined,
                 startsAt: start,
-                dueAt: due,
+                dueAt: finish,
                 estimatedHours: Number(currentTask.estimatedHours ?? 0),
               },
             );
+          }
 
-            const actorMembership = await transaction.membership.findUniqueOrThrow({
+          const actorMembership =
+            await transaction.membership.findUniqueOrThrow({
               where: {
                 userId_organizationId: {
                   userId: actorId,
@@ -893,66 +1008,65 @@ export class TasksService {
               select: { id: true },
             });
 
-            const result = await transaction.task.update({
-              where: {
-                organizationId_id: {
-                  organizationId,
-                  id: task.id,
-                },
+          const result = await transaction.task.update({
+            where: {
+              organizationId_id: {
+                organizationId,
+                id: task.id,
               },
-              data: {
-                startsAt: start,
-                dueAt: due,
-              },
-            });
-
-            await transaction.taskHistory.createMany({
-              data: [
-                {
-                  organizationId,
-                  taskId: task.id,
-                  actorId: actorMembership.id,
-                  field: 'startsAt',
-                  oldValue: currentTask.startsAt?.toISOString() ?? null,
-                  newValue: start.toISOString(),
-                },
-                {
-                  organizationId,
-                  taskId: task.id,
-                  actorId: actorMembership.id,
-                  field: 'dueAt',
-                  oldValue: currentTask.dueAt?.toISOString() ?? null,
-                  newValue: due.toISOString(),
-                },
-              ],
-            });
-
-            return result;
+            },
+            data: {
+              plannedStartsAt: start,
+              plannedFinishAt: finish,
+            },
           });
 
-          if (!updated) {
-            if (attempt >= 2) {
-              throw new ConflictException(
-                'No fue posible recalcular las fechas porque las tareas cambiaron concurrentemente. Intenta nuevamente.',
-              );
-            }
+          await transaction.taskHistory.createMany({
+            data: [
+              {
+                organizationId,
+                taskId: task.id,
+                actorId: actorMembership.id,
+                field: 'plannedStartsAt',
+                oldValue:
+                  currentTask.plannedStartsAt?.toISOString() ?? null,
+                newValue: start?.toISOString() ?? null,
+              },
+              {
+                organizationId,
+                taskId: task.id,
+                actorId: actorMembership.id,
+                field: 'plannedFinishAt',
+                oldValue:
+                  currentTask.plannedFinishAt?.toISOString() ?? null,
+                newValue: finish?.toISOString() ?? null,
+              },
+            ],
+          });
 
-            return this.recalculateDependentDates(
-              organizationId,
-              projectId,
-              actorId,
-              attempt + 1,
-            );
-          }
+          return result;
+        },
+      );
 
-          task.startsAt = updated.startsAt;
-          task.dueAt = updated.dueAt;
+      if (!updated) {
+        if (attempt >= 2) {
+          throw new ConflictException(
+            'No fue posible recalcular las fechas porque las tareas cambiaron concurrentemente. Intenta nuevamente.',
+          );
         }
-        pending.delete(taskId);
-        changed = true;
+
+        return this.recalculateDependentDates(
+          organizationId,
+          projectId,
+          actorId,
+          attempt + 1,
+        );
       }
+      task.plannedStartsAt = updated.plannedStartsAt;
+      task.plannedFinishAt = updated.plannedFinishAt;
     }
   }
+
 
   private async membershipId(userId: string, organizationId: string): Promise<string> {
     const membership = await this.prisma.membership.findUniqueOrThrow({
@@ -963,70 +1077,239 @@ export class TasksService {
   }
 
   private schedule(daysValue: unknown, hoursValue: unknown) {
-    const days = Array.isArray(daysValue) && daysValue.every((day) => Number.isInteger(day))
-      ? daysValue as number[]
-      : [1, 2, 3, 4, 5];
-    const hours = hoursValue && typeof hoursValue === 'object'
-      ? hoursValue as { start?: string; end?: string }
-      : {};
-    const parse = (value: string | undefined, fallback: number) => {
-      const match = value?.match(/^([01]\d|2[0-3]):([0-5]\d)$/);
-      return match ? Number(match[1]) * 60 + Number(match[2]) : fallback;
+    const defaultDays = [1, 2, 3, 4, 5];
+
+    let days: number[];
+
+    if (daysValue === undefined || daysValue === null) {
+      days = defaultDays;
+    } else {
+      if (
+        !Array.isArray(daysValue) ||
+        daysValue.length === 0 ||
+        !daysValue.every(
+          (day) =>
+            Number.isInteger(day) &&
+            day >= 1 &&
+            day <= 7,
+        ) ||
+        new Set(daysValue).size !== daysValue.length
+      ) {
+        throw new ConflictException(
+          'La configuración de días laborables no es válida. Debe contener días únicos entre 1 y 7.',
+        );
+      }
+
+      days = [...daysValue] as number[];
+    }
+
+    let hours: { start?: string; end?: string };
+
+    if (hoursValue === undefined || hoursValue === null) {
+      hours = {
+        start: '09:00',
+        end: '17:00',
+      };
+    } else {
+      if (
+        typeof hoursValue !== 'object' ||
+        Array.isArray(hoursValue)
+      ) {
+        throw new ConflictException(
+          'La configuración del horario laboral no es válida.',
+        );
+      }
+
+      hours = hoursValue as {
+        start?: string;
+        end?: string;
+      };
+    }
+
+    const parseTime = (value: string | undefined): number | null => {
+      if (typeof value !== 'string') return null;
+
+      const match = value.match(/^([01]\d|2[0-3]):([0-5]\d)$/);
+
+      if (!match) return null;
+
+      return Number(match[1]) * 60 + Number(match[2]);
     };
-    const startMinutes = parse(hours.start, 9 * 60);
-    const endMinutes = parse(hours.end, 17 * 60);
+
+    const startMinutes = parseTime(hours.start);
+    const endMinutes = parseTime(hours.end);
+
+    if (
+      startMinutes === null ||
+      endMinutes === null ||
+      endMinutes <= startMinutes
+    ) {
+      throw new ConflictException(
+        'El horario laboral no es válido. La hora de finalización debe ser posterior a la hora de inicio.',
+      );
+    }
+
     return {
       days,
       startMinutes,
-      endMinutes: Math.max(startMinutes + 1, endMinutes),
+      endMinutes,
     };
   }
 
-  private nextWorkingTime(value: Date, schedule: {
-    days: number[];
-    startMinutes: number;
-    endMinutes: number;
-  }): Date {
-    const result = new Date(value);
+
+  private atLocalTime(
+    value: Temporal.ZonedDateTime,
+    minutes: number,
+    timeZone: string,
+  ): Temporal.ZonedDateTime {
+    return Temporal.ZonedDateTime.from(
+      {
+        timeZone,
+        year: value.year,
+        month: value.month,
+        day: value.day,
+        hour: Math.floor(minutes / 60),
+        minute: minutes % 60,
+        second: 0,
+        millisecond: 0,
+      },
+      { disambiguation: 'compatible' },
+    );
+  }
+
+  private nextWorkingTime(
+    value: Date,
+    schedule: {
+      days: number[];
+      startMinutes: number;
+      endMinutes: number;
+    },
+    timeZone: string,
+  ): Date {
+    let cursor = Temporal.Instant
+      .fromEpochMilliseconds(value.getTime())
+      .toZonedDateTimeISO(timeZone);
+
     for (let attempts = 0; attempts < 370; attempts += 1) {
-      const day = result.getDay() || 7;
-      const minutes = result.getHours() * 60 + result.getMinutes();
-      if (schedule.days.includes(day) && minutes < schedule.endMinutes) {
-        if (minutes < schedule.startMinutes) result.setHours(
-          Math.floor(schedule.startMinutes / 60),
-          schedule.startMinutes % 60,
-          0,
-          0,
-        );
-        return result;
+      const isWorkingDay = schedule.days.includes(cursor.dayOfWeek);
+
+      const dayStart = this.atLocalTime(
+        cursor,
+        schedule.startMinutes,
+        timeZone,
+      );
+
+      const dayEnd = this.atLocalTime(
+        cursor,
+        schedule.endMinutes,
+        timeZone,
+      );
+
+      if (
+        isWorkingDay &&
+        Temporal.ZonedDateTime.compare(cursor, dayEnd) < 0
+      ) {
+        const normalized =
+          Temporal.ZonedDateTime.compare(cursor, dayStart) < 0
+            ? dayStart
+            : cursor;
+
+        return new Date(Number(normalized.epochMilliseconds));
       }
-      result.setDate(result.getDate() + 1);
-      result.setHours(Math.floor(schedule.startMinutes / 60), schedule.startMinutes % 60, 0, 0);
+
+      cursor = this.atLocalTime(
+        cursor.add({ days: 1 }),
+        schedule.startMinutes,
+        timeZone,
+      );
     }
-    throw new ConflictException('No existe una jornada laboral válida para reprogramar la tarea');
+
+    throw new ConflictException(
+      'No existe una jornada laboral válida para reprogramar la tarea',
+    );
   }
 
   private addWorkingHours(
     start: Date,
     hours: number,
-    schedule: { days: number[]; startMinutes: number; endMinutes: number },
+    schedule: {
+      days: number[];
+      startMinutes: number;
+      endMinutes: number;
+    },
+    timeZone: string,
   ): Date {
-    let remaining = hours;
-    let cursor = this.nextWorkingTime(start, schedule);
-    for (let attempts = 0; attempts < 370 && remaining > 0; attempts += 1) {
-      const available = (schedule.endMinutes - (cursor.getHours() * 60 + cursor.getMinutes())) / 60;
-      const consumed = Math.min(available, remaining);
-      cursor = new Date(cursor.getTime() + consumed * 60 * 60 * 1000);
-      remaining -= consumed;
-      if (remaining > 0) {
-        cursor.setDate(cursor.getDate() + 1);
-        cursor.setHours(Math.floor(schedule.startMinutes / 60), schedule.startMinutes % 60, 0, 0);
-        cursor = this.nextWorkingTime(cursor, schedule);
-      }
+    if (!Number.isFinite(hours) || hours <= 0) {
+      throw new ConflictException(
+        'La duración estimada debe ser un número finito mayor que cero.',
+      );
     }
-    if (remaining > 0) throw new ConflictException('La duración excede el calendario laboral disponible');
-    return cursor;
+    let remaining = hours;
+    let cursor = Temporal.Instant
+      .fromEpochMilliseconds(start.getTime())
+      .toZonedDateTimeISO(timeZone);
+
+    cursor = Temporal.Instant
+      .fromEpochMilliseconds(
+        this.nextWorkingTime(
+          new Date(Number(cursor.epochMilliseconds)),
+          schedule,
+          timeZone,
+        ).getTime(),
+      )
+      .toZonedDateTimeISO(timeZone);
+
+    for (let attempts = 0; attempts < 370 && remaining > 0; attempts += 1) {
+      const dayEnd = this.atLocalTime(
+        cursor,
+        schedule.endMinutes,
+        timeZone,
+      );
+
+      const availableMilliseconds = Math.max(
+        0,
+        Number(dayEnd.epochMilliseconds - cursor.epochMilliseconds),
+      );
+
+      const availableHours = availableMilliseconds / 3_600_000;
+
+      if (remaining <= availableHours) {
+        cursor = cursor.add({
+          milliseconds: Math.round(remaining * 3_600_000),
+        });
+
+        remaining = 0;
+        break;
+      }
+
+      remaining -= availableHours;
+
+      cursor = this.atLocalTime(
+        cursor.add({ days: 1 }),
+        schedule.startMinutes,
+        timeZone,
+      );
+
+      cursor = Temporal.Instant
+        .fromEpochMilliseconds(
+          this.nextWorkingTime(
+            new Date(Number(cursor.epochMilliseconds)),
+            schedule,
+            timeZone,
+          ).getTime(),
+        )
+        .toZonedDateTimeISO(timeZone);
+    }
+
+    if (remaining > 0.000001) {
+      throw new ConflictException(
+        'La duración excede el calendario laboral disponible',
+      );
+    }
+
+    return new Date(Number(cursor.epochMilliseconds));
   }
+
 
   private async lockAssignmentCapacity(
     transaction: Prisma.TransactionClient,
@@ -1065,6 +1348,7 @@ export class TasksService {
   `;
   }
 
+
   private async ensureAssignmentCapacity(
     transaction: Prisma.TransactionClient,
     organizationId: string,
@@ -1077,35 +1361,85 @@ export class TasksService {
       estimatedHours?: number;
     },
   ): Promise<void> {
-    if (!input.assigneeId || !input.startsAt || !input.dueAt || input.dueAt < input.startsAt) return;
-    const rangeStart = this.startOfUtcDay(input.startsAt);
-    const rangeEnd = this.startOfUtcDay(input.dueAt);
-    const project = await transaction.project.findFirst({
-      where: { id: projectId, organizationId },
-      select: { configuration: true },
-    });
-    let configuration = project?.configuration && typeof project.configuration === 'object'
-      ? project.configuration as { workingDays?: unknown; workingHours?: unknown }
-      : {};
-    if (!project?.configuration) {
-      const settings = await transaction.organizationSettings.findUnique({
-        where: { organizationId },
-        select: { workingDays: true, workingHours: true },
-      });
-      configuration = {
-        workingDays: settings?.workingDays,
-        workingHours: settings?.workingHours,
-      };
+    if (
+      !input.assigneeId ||
+      !input.startsAt ||
+      !input.dueAt ||
+      input.dueAt < input.startsAt
+    ) {
+      return;
     }
-    const days = Array.isArray(configuration.workingDays)
-      ? configuration.workingDays.filter((day): day is number => typeof day === 'number')
-      : [1, 2, 3, 4, 5];
-    const hours = configuration.workingHours && typeof configuration.workingHours === 'object'
-      ? configuration.workingHours as { start?: string; end?: string }
-      : { start: '09:00', end: '17:00' };
-    const dailyHours = this.dailyHours(hours);
-    const totalDays = this.workingDaysBetween(input.startsAt, input.dueAt, days);
+
+    const [project, settings] = await Promise.all([
+      transaction.project.findFirst({
+        where: { id: projectId, organizationId },
+        select: { configuration: true },
+      }),
+      transaction.organizationSettings.findUnique({
+        where: { organizationId },
+        select: {
+          workingDays: true,
+          workingHours: true,
+          timeZone: true,
+        },
+      }),
+    ]);
+
+    const timeZone = settings?.timeZone ?? 'UTC';
+
+    try {
+      Temporal.Instant
+        .fromEpochMilliseconds(Date.now())
+        .toZonedDateTimeISO(timeZone);
+    } catch {
+      throw new ConflictException(
+        `La zona horaria configurada no es válida: ${timeZone}`,
+      );
+    }
+
+    const configuration =
+      project?.configuration &&
+        typeof project.configuration === 'object'
+        ? project.configuration as {
+          workingDays?: unknown;
+          workingHours?: unknown;
+        }
+        : {};
+
+    const schedule = this.schedule(
+      configuration.workingDays ?? settings?.workingDays,
+      configuration.workingHours ?? settings?.workingHours,
+    );
+
+    const dailyHours =
+      (schedule.endMinutes - schedule.startMinutes) / 60;
+
+    const rangeStart = this.toDatabaseDate(
+      this.localDateFromInstant(input.startsAt, timeZone),
+    );
+
+    const rangeEnd = this.toDatabaseDate(
+      this.localDateFromInstant(input.dueAt, timeZone),
+    );
+
+    const startDate = this.localDateFromInstant(
+      input.startsAt,
+      timeZone,
+    );
+
+    const endDate = this.localDateFromInstant(
+      input.dueAt,
+      timeZone,
+    );
+
+    const totalDays = this.workingLocalDaysBetween(
+      startDate,
+      endDate,
+      schedule.days,
+    );
+
     if (!totalDays || dailyHours <= 0) return;
+
     const [existing, absences, adjustments] = await Promise.all([
       transaction.task.findMany({
         where: {
@@ -1145,30 +1479,179 @@ export class TasksService {
           },
         },
         select: {
+          date: true,
           hours: true,
           type: true,
         },
       }),
     ]);
+
+    const absenceHours = absences.reduce((sum, absence) => {
+      const absenceStart = this.dateOnlyFromDatabase(
+        absence.startsAt,
+      );
+
+      const absenceEnd = this.dateOnlyFromDatabase(
+        absence.endsAt,
+      );
+
+      const overlapDays = this.overlapWorkingLocalDays(
+        absenceStart,
+        absenceEnd,
+        startDate,
+        endDate,
+        schedule.days,
+      );
+
+      return sum + overlapDays * dailyHours;
+    }, 0);
+
+    const adjustmentHours = adjustments.reduce(
+      (sum, adjustment) =>
+        sum +
+        (adjustment.type === 'INCREASE'
+          ? Number(adjustment.hours)
+          : -Number(adjustment.hours)),
+      0,
+    );
+
     const available = Math.max(
       0,
-      totalDays * dailyHours
-      - absences.reduce((sum, absence) => sum + this.overlapWorkingDays(absence.startsAt, absence.endsAt, input.startsAt!, input.dueAt!, days) * dailyHours, 0)
-      + adjustments.reduce((sum, adjustment) => sum + (adjustment.type === 'INCREASE' ? Number(adjustment.hours) : -Number(adjustment.hours)), 0),
+      totalDays * dailyHours -
+      absenceHours +
+      adjustmentHours,
     );
+
     const assigned = existing.reduce((sum, task) => {
       if (!task.startsAt || !task.dueAt) return sum;
-      const overlapDays = this.overlapWorkingDays(task.startsAt, task.dueAt, input.startsAt!, input.dueAt!, days);
-      const taskDays = this.workingDaysBetween(task.startsAt, task.dueAt, days);
-      return sum + (taskDays ? Number(task.estimatedHours ?? 0) * overlapDays / taskDays : 0);
+
+      const taskStart = this.localDateFromInstant(
+        task.startsAt,
+        timeZone,
+      );
+
+      const taskEnd = this.localDateFromInstant(
+        task.dueAt,
+        timeZone,
+      );
+
+      const overlapDays = this.overlapWorkingLocalDays(
+        taskStart,
+        taskEnd,
+        startDate,
+        endDate,
+        schedule.days,
+      );
+
+      const taskDays = this.workingLocalDaysBetween(
+        taskStart,
+        taskEnd,
+        schedule.days,
+      );
+
+      return sum +
+        (taskDays
+          ? Number(task.estimatedHours ?? 0) *
+          overlapDays / taskDays
+          : 0);
     }, 0);
+
     const requested = Number(input.estimatedHours ?? 0);
+
     if (assigned + requested > available) {
       throw new ConflictException(
-        `La asignación excede la capacidad disponible (${(assigned + requested).toFixed(2)} h de ${available.toFixed(2)} h entre ${input.startsAt.toISOString().slice(0, 10)} y ${input.dueAt.toISOString().slice(0, 10)})`,
+        `La asignación excede la capacidad disponible (${(assigned + requested).toFixed(2)} h de ${available.toFixed(2)} h entre ${startDate.toString()} y ${endDate.toString()})`,
       );
     }
   }
+
+
+  private localDateFromInstant(
+    value: Date,
+    timeZone: string,
+  ): Temporal.PlainDate {
+    return Temporal.Instant
+      .fromEpochMilliseconds(value.getTime())
+      .toZonedDateTimeISO(timeZone)
+      .toPlainDate();
+  }
+
+  private dateOnlyFromDatabase(
+    value: Date,
+  ): Temporal.PlainDate {
+    return Temporal.PlainDate.from({
+      year: value.getUTCFullYear(),
+      month: value.getUTCMonth() + 1,
+      day: value.getUTCDate(),
+    });
+  }
+
+  private toDatabaseDate(
+    value: Temporal.PlainDate,
+  ): Date {
+    return new Date(
+      Date.UTC(
+        value.year,
+        value.month - 1,
+        value.day,
+      ),
+    );
+  }
+
+  private workingLocalDaysBetween(
+    start: Temporal.PlainDate,
+    end: Temporal.PlainDate,
+    days: number[],
+  ): number {
+    if (Temporal.PlainDate.compare(end, start) < 0) {
+      return 0;
+    }
+
+    let count = 0;
+    let cursor = start;
+
+    while (Temporal.PlainDate.compare(cursor, end) <= 0) {
+      if (days.includes(cursor.dayOfWeek)) {
+        count += 1;
+      }
+
+      cursor = cursor.add({ days: 1 });
+    }
+
+    return count;
+  }
+
+  private overlapWorkingLocalDays(
+    start: Temporal.PlainDate,
+    end: Temporal.PlainDate,
+    rangeStart: Temporal.PlainDate,
+    rangeEnd: Temporal.PlainDate,
+    days: number[],
+  ): number {
+    if (
+      Temporal.PlainDate.compare(end, rangeStart) < 0 ||
+      Temporal.PlainDate.compare(start, rangeEnd) > 0
+    ) {
+      return 0;
+    }
+
+    const overlapStart =
+      Temporal.PlainDate.compare(start, rangeStart) > 0
+        ? start
+        : rangeStart;
+
+    const overlapEnd =
+      Temporal.PlainDate.compare(end, rangeEnd) < 0
+        ? end
+        : rangeEnd;
+
+    return this.workingLocalDaysBetween(
+      overlapStart,
+      overlapEnd,
+      days,
+    );
+  }
+
 
   private dailyHours(value: { start?: string; end?: string }): number {
     const start = value.start?.match(/^(\d{2}):(\d{2})$/);
